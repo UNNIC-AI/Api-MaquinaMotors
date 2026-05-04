@@ -92,6 +92,71 @@ function isValidDateInput(value) {
   return !Number.isNaN(new Date(value).getTime());
 }
 
+async function loadConversacionesPorTelefono(phone, { from, to, maxMessages }) {
+  let dbQuery = supabase
+    .from("conversaciones")
+    .select("*")
+    .eq("phone", phone)
+    .order("timestamp", { ascending: true })
+    .limit(maxMessages);
+  if (from) dbQuery = dbQuery.gte("timestamp", from);
+  if (to) dbQuery = dbQuery.lte("timestamp", to);
+  
+  const result = await dbQuery;
+  return result;
+}
+
+async function generarResumenConOpenAI(transcript) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY no configurada");
+  }
+  const base = (process.env.OPENAI_BASE_URL || "https://api.openai.com").replace(/\/$/, "");
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+  const r = await fetch(`${base}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.3,
+      max_tokens: 700,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Eres un asistente que resume conversaciones comerciales por WhatsApp/chat. Responde SIEMPRE en español. " +
+            "Devuelve un resumen breve (5-10 frases máximo): intención del cliente, datos relevantes (modelo, precio, urgencia), " +
+            "acuerdos o siguientes pasos, y tono general. No inventes datos que no aparezcan en el texto.",
+        },
+        { role: "user", content: transcript },
+      ],
+    }),
+  });
+
+  const raw = await r.text();
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`Respuesta invalida del proveedor de resumen: ${raw.slice(0, 200)}`);
+  }
+
+  if (!r.ok) {
+    const msg = parsed?.error?.message || raw.slice(0, 300);
+    throw new Error(msg || `Error HTTP ${r.status}`);
+  }
+
+  const text = parsed?.choices?.[0]?.message?.content?.trim();
+  if (!text) {
+    throw new Error("El modelo no devolvio texto de resumen");
+  }
+  return text;
+}
+
 /**
  * @openapi
  * /api/health:
@@ -308,16 +373,11 @@ app.get("/api/conversaciones/:phone", requireApiKey, async (req, res) => {
     return res.status(400).json({ error: "El parametro 'from' no puede ser mayor que 'to'." });
   }
 
-  let dbQuery = supabase
-    .from("conversaciones")
-    .select("*")
-    .eq("phone", phone)
-    .order("timestamp", { ascending: true })
-    .limit(5000);
-  if (from) dbQuery = dbQuery.gte("timestamp", from);
-  if (to) dbQuery = dbQuery.lte("timestamp", to);
-
-  const { data, error } = await dbQuery;
+  const { data, error } = await loadConversacionesPorTelefono(phone, {
+    from,
+    to,
+    maxMessages: 5000,
+  });
 
   if (error) {
     return res.status(500).json({ error: "Error consultando base de datos", detail: error.message });
@@ -339,6 +399,147 @@ app.get("/api/conversaciones/:phone", requireApiKey, async (req, res) => {
       procesado: row.procesado,
     })),
   });
+});
+
+/**
+ * @openapi
+ * /api/conversaciones/{phone}/resumen:
+ *   post:
+ *     tags: [Conversaciones]
+ *     summary: Genera resumen de conversacion por telefono con IA
+ *     description: Genera un resumen automatico de la conversacion usando OpenAI. El body es opcional, tambien puedes pasar parametros por query string.
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: phone
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Numero de telefono
+ *       - in: query
+ *         name: from
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: Filtra mensajes desde esta fecha ISO (alternativa al body)
+ *       - in: query
+ *         name: to
+ *         schema:
+ *           type: string
+ *           format: date-time
+ *         description: Filtra mensajes hasta esta fecha ISO (alternativa al body)
+ *       - in: query
+ *         name: max_messages
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 500
+ *           default: 100
+ *         description: Maximo de mensajes a considerar (alternativa al body)
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             example: {}
+ *             properties:
+ *               from:
+ *                 type: string
+ *                 format: date-time
+ *                 description: Filtra mensajes desde esta fecha ISO (opcional)
+ *               to:
+ *                 type: string
+ *                 format: date-time
+ *                 description: Filtra mensajes hasta esta fecha ISO (opcional)
+ *               max_messages:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 500
+ *                 default: 100
+ *                 description: Maximo de mensajes a considerar (opcional, default 100)
+ *     responses:
+ *       200:
+ *         description: Resumen generado correctamente
+ *       400:
+ *         description: Parametros invalidos
+ *       401:
+ *         description: No autorizado
+ *       500:
+ *         description: Error generando resumen
+ */
+app.post("/api/conversaciones/:phone/resumen", requireApiKey, async (req, res) => {
+  const { phone } = req.params;
+  let from = req.body?.from || req.query.from;
+  let to = req.body?.to || req.query.to;
+  const maxMessages = Math.min(Math.max(Number(req.body?.max_messages || req.query.max_messages) || 100, 1), 500);
+
+  const now = new Date();
+  
+  if (from && !isValidDateInput(from)) {
+    from = null;
+  }
+  if (to && !isValidDateInput(to)) {
+    to = null;
+  }
+  
+  if (from && new Date(from) > now) {
+    from = null;
+  }
+  if (to && new Date(to) > now) {
+    to = null;
+  }
+  
+  if (from && to && new Date(from) > new Date(to)) {
+    from = null;
+    to = null;
+  }
+
+  try {
+    const { data, error } = await loadConversacionesPorTelefono(phone, {
+      from,
+      to,
+      maxMessages,
+    });
+
+    if (error) {
+      return res.status(500).json({ error: "Error consultando base de datos", detail: error.message });
+    }
+
+    if (!data || data.length === 0) {
+      return res.status(404).json({ 
+        error: "No se encontraron mensajes para este telefono"
+      });
+    }
+
+    const transcript = data
+      .map((row) => {
+        const roleName = row.role === "user" ? "Cliente" : row.role === "assistant" ? "Agente" : row.role;
+        const msg = typeof row.message === "string" ? row.message : JSON.stringify(row.message);
+        return `[${roleName}]: ${msg}`;
+      })
+      .join("\n\n");
+
+    const resumen = await generarResumenConOpenAI(transcript);
+
+    return res.json({
+      phone,
+      message_count: data.length,
+      filters: {
+        from: from || null,
+        to: to || null,
+        max_messages: maxMessages,
+      },
+      resumen,
+    });
+  } catch (err) {
+    console.error("Error generando resumen:", err);
+    return res.status(500).json({
+      error: "Error generando resumen",
+      detail: err.message || String(err),
+    });
+  }
 });
 
 const swaggerSpec = swaggerJSDoc({

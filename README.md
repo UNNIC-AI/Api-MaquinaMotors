@@ -41,6 +41,10 @@ SUPABASE_URL=tu_url_de_supabase
 SUPABASE_SERVICE_ROLE_KEY=tu_service_role_key
 API_ACCESS_KEY=genera_una_clave_segura
 CORS_ORIGINS=http://localhost:3000
+
+# Opcional: para endpoint de resumen con IA
+OPENAI_API_KEY=sk-tu-clave-openai
+OPENAI_MODEL=gpt-4o-mini
 ```
 
 ## 🏃 Ejecución
@@ -92,6 +96,47 @@ Detalle de mensajes de un teléfono específico
 curl -H "x-api-key: TU_CLAVE" \
   "http://localhost:3000/api/conversaciones/34612345678"
 ```
+
+#### `POST /api/conversaciones/:phone/resumen`
+Genera un resumen automático de la conversación con IA
+
+**Body opcional (JSON):**
+```json
+{
+  "from": "2026-04-01T00:00:00Z",
+  "to": "2026-04-30T23:59:59Z",
+  "max_messages": 100
+}
+```
+
+**Ejemplos:**
+
+Sin body (usa defaults, trae últimos 100 mensajes):
+```bash
+curl -X POST \
+  -H "x-api-key: TU_CLAVE" \
+  -H "Content-Type: application/json" \
+  -d '{}' \
+  "http://localhost:3000/api/conversaciones/34612345678/resumen"
+```
+
+Con parámetros en el body:
+```bash
+curl -X POST \
+  -H "x-api-key: TU_CLAVE" \
+  -H "Content-Type: application/json" \
+  -d '{"max_messages": 50}' \
+  "http://localhost:3000/api/conversaciones/34612345678/resumen"
+```
+
+O con query string (sin body):
+```bash
+curl -X POST \
+  -H "x-api-key: TU_CLAVE" \
+  "http://localhost:3000/api/conversaciones/34612345678/resumen?max_messages=50"
+```
+
+**Nota:** Requiere `OPENAI_API_KEY` configurada en variables de entorno.
 
 ## 🔐 Autenticación
 
