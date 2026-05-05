@@ -11,7 +11,7 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-const requiredEnv = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "API_ACCESS_KEY"];
+const requiredEnv = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "API_ACCESS_KEY", "ENCRYPTION_KEY"];
 for (const key of requiredEnv) {
   if (!process.env[key]) {
     throw new Error(`Falta variable de entorno requerida: ${key}`);
@@ -67,43 +67,20 @@ function requireApiKey(req, res, next) {
   next();
 }
 
-function buildPreview(messageField) {
-  try {
-    const parsed = typeof messageField === "string" ? JSON.parse(messageField) : messageField;
-    if (parsed?.type === "human" && typeof parsed?.content === "string") {
-      return parsed.content.slice(0, 120);
-    }
-    return "";
-  } catch {
-    return "";
-  }
-}
-
-function parseMessage(messageField) {
-  try {
-    return typeof messageField === "string" ? JSON.parse(messageField) : messageField;
-  } catch {
-    return { type: "unknown", content: String(messageField) };
-  }
-}
-
 function isValidDateInput(value) {
   if (!value || typeof value !== "string") return false;
   return !Number.isNaN(new Date(value).getTime());
 }
 
-async function loadConversacionesPorTelefono(phone, { from, to, maxMessages }) {
-  let dbQuery = supabase
-    .from("conversaciones")
-    .select("*")
-    .eq("phone", phone)
-    .order("timestamp", { ascending: true })
-    .limit(maxMessages);
-  if (from) dbQuery = dbQuery.gte("timestamp", from);
-  if (to) dbQuery = dbQuery.lte("timestamp", to);
-  
-  const result = await dbQuery;
-  return result;
+async function queryConversacionesDesencriptadas({ phone, from, to, orderAsc, limit }) {
+  const { data, error } = await supabase.rpc("get_conversaciones_decrypted", {
+    filter_phone: phone || null,
+    filter_from: from || null,
+    filter_to: to || null,
+    order_asc: orderAsc ?? false,
+    limit_count: limit ?? 5000,
+  });
+  return { data, error };
 }
 
 async function generarResumenConOpenAI(transcript) {
@@ -252,15 +229,13 @@ app.get("/api/conversaciones", requireApiKey, async (req, res) => {
     return res.status(400).json({ error: "El parametro 'from' no puede ser mayor que 'to'." });
   }
 
-  let dbQuery = supabase
-    .from("conversaciones")
-    .select("*")
-    .order("timestamp", { ascending: false })
-    .limit(fetchSize);
-  if (from) dbQuery = dbQuery.gte("timestamp", from);
-  if (to) dbQuery = dbQuery.lte("timestamp", to);
-
-  const { data, error } = await dbQuery;
+  const { data, error } = await queryConversacionesDesencriptadas({
+    phone: null,
+    from,
+    to,
+    orderAsc: false,
+    limit: fetchSize,
+  });
 
   if (error) {
     return res.status(500).json({ error: "Error consultando base de datos", detail: error.message });
@@ -268,12 +243,11 @@ app.get("/api/conversaciones", requireApiKey, async (req, res) => {
 
   const grouped = new Map();
   for (const row of data || []) {
-    const sessionKey = row.phone || row.user || 'unknown';
+    const sessionKey = row.phone || 'unknown';
     
     if (!grouped.has(sessionKey)) {
       grouped.set(sessionKey, {
         phone: row.phone,
-        user: row.user,
         first_message_at: row.timestamp,
         last_message_at: row.timestamp,
         message_count: 0,
@@ -373,10 +347,12 @@ app.get("/api/conversaciones/:phone", requireApiKey, async (req, res) => {
     return res.status(400).json({ error: "El parametro 'from' no puede ser mayor que 'to'." });
   }
 
-  const { data, error } = await loadConversacionesPorTelefono(phone, {
+  const { data, error } = await queryConversacionesDesencriptadas({
+    phone,
     from,
     to,
-    maxMessages: 5000,
+    orderAsc: true,
+    limit: 5000,
   });
 
   if (error) {
@@ -394,7 +370,7 @@ app.get("/api/conversaciones/:phone", requireApiKey, async (req, res) => {
       id: row.id,
       timestamp: row.timestamp,
       role: row.role,
-      user: row.user,
+      phone: row.phone,
       message: row.message,
       procesado: row.procesado,
     })),
@@ -497,10 +473,12 @@ app.post("/api/conversaciones/:phone/resumen", requireApiKey, async (req, res) =
   }
 
   try {
-    const { data, error } = await loadConversacionesPorTelefono(phone, {
+    const { data, error } = await queryConversacionesDesencriptadas({
+      phone,
       from,
       to,
-      maxMessages,
+      orderAsc: true,
+      limit: maxMessages,
     });
 
     if (error) {
