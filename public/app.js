@@ -167,6 +167,7 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     const view = btn.dataset.view;
     $("#view-conversaciones").hidden = view !== "conversaciones";
     $("#view-resumenes").hidden = view !== "resumenes";
+    if (view === "resumenes") loadSavedAnalyses();
   });
 });
 
@@ -379,71 +380,176 @@ function updateWeekLabel() {
   $("#week-label").textContent = fmtRange(monday, sunday);
   $("#week-next").disabled = weekOffset >= 0;
 }
-function resetWeekSummary() {
-  $("#week-stats").innerHTML = "";
-  $("#week-summary").innerHTML =
-    '<div class="placeholder"><div class="detail-empty-mark">MM</div><p>Pulsa <strong>Generar resumen</strong> para esta semana.</p></div>';
-}
 function statCard(num, label) {
   const c = el("div", "stat-card");
   c.appendChild(el("div", "stat-num", String(num)));
   c.appendChild(el("div", "stat-label", label));
   return c;
 }
+function currentWeekParams() {
+  const { monday, sunday } = weekRange(weekOffset);
+  return { from: `${ymd(monday)}T00:00:00`, to: `${ymd(sunday)}T23:59:59` };
+}
+function emptyPrompt(msg) {
+  const d = el("div", "placeholder");
+  const mark = el("div", "detail-empty-mark", "MM");
+  const p = el("p");
+  p.innerHTML = msg || 'No hay análisis de esta semana. Pulsa <strong>Generar análisis</strong>.';
+  d.appendChild(mark);
+  d.appendChild(p);
+  return d;
+}
 
-$("#week-prev").addEventListener("click", () => { weekOffset -= 1; updateWeekLabel(); resetWeekSummary(); });
-$("#week-next").addEventListener("click", () => { if (weekOffset < 0) { weekOffset += 1; updateWeekLabel(); resetWeekSummary(); } });
+let savedAnalyses = [];
+let selectedAnalysisId = null;
+
+function renderStats(s) {
+  const stats = $("#week-stats");
+  stats.innerHTML = "";
+  if (!s) return;
+  stats.appendChild(statCard(s.conversaciones ?? 0, "Conversaciones"));
+  stats.appendChild(statCard(s.mensajes ?? 0, "Mensajes"));
+  stats.appendChild(statCard(s.mensajes_cliente ?? 0, "Del cliente"));
+  stats.appendChild(statCard(s.mensajes_agente ?? 0, "Del agente"));
+}
+
+function renderHistory() {
+  const history = $("#week-history");
+  history.innerHTML = "";
+  if (!savedAnalyses.length) return;
+  history.appendChild(el("div", "history-label", `Análisis guardados (${savedAnalyses.length})`));
+  const chips = el("div", "history-chips");
+  savedAnalyses.forEach((a) => {
+    const chip = el("div", "chip" + (a.id === selectedAnalysisId ? " active" : ""));
+    const t = new Date(a.created_at);
+    chip.appendChild(el("span", "chip-label", t.toLocaleString("es-ES", {
+      day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+    })));
+    const del = el("button", "chip-del", "×");
+    del.title = "Borrar este análisis";
+    del.addEventListener("click", (e) => { e.stopPropagation(); deleteAnalysis(a.id); });
+    chip.appendChild(del);
+    chip.addEventListener("click", () => selectAnalysis(a.id));
+    chips.appendChild(chip);
+  });
+  history.appendChild(chips);
+}
+
+function selectAnalysis(id) {
+  selectedAnalysisId = id;
+  const a = savedAnalyses.find((x) => x.id === id);
+  renderHistory();
+  renderStats(a ? a.stats : null);
+  const summary = $("#week-summary");
+  summary.innerHTML = "";
+  if (!a) { summary.appendChild(emptyPrompt()); return; }
+  const wrap = el("div", "summary-box");
+  const title = el("div", "summary-title");
+  title.appendChild(el("span", null, "Análisis de la semana"));
+  const copy = el("button", "summary-copy", "Copiar");
+  copy.addEventListener("click", () => {
+    navigator.clipboard?.writeText(a.resumen).then(
+      () => { copy.textContent = "Copiado ✓"; setTimeout(() => (copy.textContent = "Copiar"), 1500); },
+      () => toast("No se pudo copiar")
+    );
+  });
+  title.appendChild(copy);
+  wrap.appendChild(title);
+  const body = el("div", "summary-text");
+  renderResumenText(body, a.resumen);
+  wrap.appendChild(body);
+  summary.appendChild(wrap);
+}
+
+// ¿La línea parece un título de apartado? (toda en mayúsculas y corta)
+function isHeading(line) {
+  const t = line.trim();
+  if (t.length < 3 || t.length > 60) return false;
+  if (!/[A-ZÁÉÍÓÚÜÑ]/.test(t)) return false;
+  return t === t.toUpperCase();
+}
+// Renderiza el informe: títulos destacados + párrafos
+function renderResumenText(container, text) {
+  container.innerHTML = "";
+  for (const raw of String(text || "").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (isHeading(line)) container.appendChild(el("div", "summary-h", line));
+    else container.appendChild(el("p", "summary-p", line));
+  }
+}
+
+async function loadSavedAnalyses() {
+  const { from, to } = currentWeekParams();
+  const summary = $("#week-summary");
+  $("#week-history").innerHTML = "";
+  $("#week-stats").innerHTML = "";
+  summary.innerHTML = "";
+  summary.appendChild(loadingState());
+  try {
+    const params = new URLSearchParams({ from, to });
+    const data = await api(`/api/resumenes-semanales?${params}`);
+    savedAnalyses = data.data || [];
+    if (savedAnalyses.length) {
+      selectAnalysis(savedAnalyses[0].id);
+    } else {
+      renderHistory();
+      summary.innerHTML = "";
+      summary.appendChild(emptyPrompt());
+    }
+  } catch (ex) {
+    summary.innerHTML = "";
+    summary.appendChild(emptyState(ex.message));
+    toast(ex.message);
+  }
+}
+
+async function deleteAnalysis(id) {
+  try {
+    await api(`/api/resumenes-semanales/${id}`, { method: "DELETE" });
+    savedAnalyses = savedAnalyses.filter((a) => a.id !== id);
+    if (selectedAnalysisId === id) selectedAnalysisId = savedAnalyses[0] ? savedAnalyses[0].id : null;
+    if (selectedAnalysisId) {
+      selectAnalysis(selectedAnalysisId);
+    } else {
+      renderHistory();
+      renderStats(null);
+      $("#week-summary").innerHTML = "";
+      $("#week-summary").appendChild(emptyPrompt());
+    }
+    toast("Análisis borrado");
+  } catch (ex) {
+    toast(ex.message);
+  }
+}
+
+$("#week-prev").addEventListener("click", () => { weekOffset -= 1; updateWeekLabel(); loadSavedAnalyses(); });
+$("#week-next").addEventListener("click", () => { if (weekOffset < 0) { weekOffset += 1; updateWeekLabel(); loadSavedAnalyses(); } });
 
 $("#week-gen").addEventListener("click", async () => {
-  const { monday, sunday } = weekRange(weekOffset);
   const btn = $("#week-gen");
-  const stats = $("#week-stats");
   const summary = $("#week-summary");
   btn.disabled = true;
   btn.textContent = "Generando…";
-  stats.innerHTML = "";
+  $("#week-stats").innerHTML = "";
   summary.innerHTML = "";
   summary.appendChild(loadingState());
-
-  const params = new URLSearchParams();
-  params.set("from", `${ymd(monday)}T00:00:00`);
-  params.set("to", `${ymd(sunday)}T23:59:59`);
-
   try {
-    const data = await api(`/api/resumen-semanal?${params}`);
-    const s = data.stats || {};
-    stats.appendChild(statCard(s.conversaciones ?? 0, "Conversaciones"));
-    stats.appendChild(statCard(s.mensajes ?? 0, "Mensajes"));
-    stats.appendChild(statCard(s.mensajes_cliente ?? 0, "Del cliente"));
-    stats.appendChild(statCard(s.mensajes_agente ?? 0, "Del agente"));
-
-    summary.innerHTML = "";
-    if (!data.resumen) {
-      summary.appendChild(emptyState("No hubo actividad esa semana."));
-    } else {
-      const title = el("div", "summary-title");
-      title.appendChild(el("span", null, "Resumen de la semana"));
-      const copy = el("button", "summary-copy", "Copiar");
-      copy.addEventListener("click", () => {
-        navigator.clipboard?.writeText(data.resumen).then(
-          () => { copy.textContent = "Copiado ✓"; setTimeout(() => (copy.textContent = "Copiar"), 1500); },
-          () => toast("No se pudo copiar")
-        );
-      });
-      title.appendChild(copy);
-      const wrap = el("div", "summary-box");
-      wrap.appendChild(title);
-      wrap.appendChild(el("div", "summary-text", data.resumen));
-      if (data.truncado) wrap.appendChild(el("div", "summary-note", "* Semana con mucho volumen: resumen basado en una muestra de los mensajes."));
-      summary.appendChild(wrap);
-    }
+    const { from, to } = currentWeekParams();
+    const data = await api(`/api/resumenes-semanales`, {
+      method: "POST",
+      body: JSON.stringify({ from, to }),
+    });
+    savedAnalyses.unshift(data);
+    selectAnalysis(data.id);
+    if (data.truncado) toast("Semana con mucho volumen: análisis sobre una muestra de los mensajes.");
   } catch (ex) {
     summary.innerHTML = "";
     summary.appendChild(emptyState(ex.message));
     toast(ex.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = "Generar resumen";
+    btn.textContent = "Generar análisis";
   }
 });
 
