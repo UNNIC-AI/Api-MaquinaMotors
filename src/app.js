@@ -317,9 +317,19 @@ app.get("/api/conversaciones", requireApiKey, async (req, res) => {
     }
   }
 
+  // Dígitos de la búsqueda (para buscar por teléfono con o sin +34, espacios, etc.)
+  const queryDigits = queryText.replace(/\D/g, "");
   const filteredSessions = [...grouped.values()].filter((session) => {
       if (!queryText) return true;
-      return session.preview.toLowerCase().includes(queryText);
+      const porTexto = session.preview.toLowerCase().includes(queryText);
+      const phoneDigits = String(session.phone || "").replace(/\D/g, "");
+      // Coincidencia por teléfono: el nº guardado ya incluye el 34, así que
+      // "626..." (sin prefijo) o "34626..." (con prefijo) encajan igual.
+      const porTelefono =
+        queryDigits.length >= 3 &&
+        (phoneDigits.includes(queryDigits) ||
+          phoneDigits.replace(/^34/, "").includes(queryDigits.replace(/^34/, "")));
+      return porTexto || porTelefono;
     });
 
   const sessions = filteredSessions
