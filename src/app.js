@@ -1,5 +1,6 @@
 require("dotenv").config();
 
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -47,6 +48,10 @@ const limiter = rateLimit({
 
 app.use(limiter);
 
+// Panel web (frontend estático). Los ficheros de /public no requieren API key;
+// el propio panel pide la clave al usuario y la envia en cada peticion a /api.
+app.use(express.static(path.join(__dirname, "..", "public")));
+
 function requireApiKey(req, res, next) {
   const incoming = req.header("x-api-key");
   
@@ -74,6 +79,7 @@ function isValidDateInput(value) {
 
 async function queryConversacionesDesencriptadas({ phone, from, to, orderAsc, limit }) {
   const { data, error } = await supabase.rpc("get_conversaciones_decrypted", {
+    enc_key: process.env.ENCRYPTION_KEY,
     filter_phone: phone || null,
     filter_from: from || null,
     filter_to: to || null,
@@ -83,13 +89,52 @@ async function queryConversacionesDesencriptadas({ phone, from, to, orderAsc, li
   return { data, error };
 }
 
-async function generarResumenConOpenAI(transcript) {
+// Devuelve un mapa { phone -> {nombre, email, codigo_postal, last_seen} }
+async function fetchClientesMap(phones) {
+  let query = supabase.from("clientes").select("phone, nombre, email, codigo_postal, last_seen");
+  if (Array.isArray(phones) && phones.length) {
+    query = query.in("phone", phones);
+  }
+  const { data, error } = await query;
+  const map = {};
+  if (!error && Array.isArray(data)) {
+    for (const c of data) {
+      const clean = (v) => (v && v !== "None" ? v : null);
+      map[c.phone] = {
+        nombre: clean(c.nombre),
+        email: clean(c.email),
+        codigo_postal: clean(c.codigo_postal),
+        last_seen: c.last_seen || null,
+      };
+    }
+  }
+  return map;
+}
+
+const SYSTEM_RESUMEN_CONVERSACION =
+  "Eres un asistente que resume conversaciones comerciales por WhatsApp/chat. Responde SIEMPRE en español. " +
+  "Devuelve un resumen breve (5-10 frases máximo): intención del cliente, datos relevantes (modelo, precio, urgencia), " +
+  "acuerdos o siguientes pasos, y tono general. No inventes datos que no aparezcan en el texto.";
+
+const SYSTEM_RESUMEN_SEMANAL =
+  "Eres un analista comercial de un concesionario de motos. Recibes las conversaciones de una semana entre clientes y el agente. " +
+  "Responde SIEMPRE en español, en formato claro con estas secciones (usa títulos en MAYÚSCULAS seguidos de dos puntos):\n" +
+  "RESUMEN GENERAL: 2-3 frases sobre la actividad de la semana.\n" +
+  "MODELOS MÁS CONSULTADOS: lista de motos/modelos mencionados y cuántas veces aprox.\n" +
+  "TEMAS RECURRENTES: precio, financiación, tasación, disponibilidad, etc.\n" +
+  "LEADS DESTACADOS: clientes con intención de compra clara y en qué punto están.\n" +
+  "RECOMENDACIONES: acciones sugeridas para el equipo comercial.\n" +
+  "No inventes datos que no aparezcan en el texto.";
+
+async function generarResumenConOpenAI(transcript, opts = {}) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     throw new Error("OPENAI_API_KEY no configurada");
   }
   const base = (process.env.OPENAI_BASE_URL || "https://api.openai.com").replace(/\/$/, "");
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const system = opts.system || SYSTEM_RESUMEN_CONVERSACION;
+  const maxTokens = opts.maxTokens || 700;
 
   const r = await fetch(`${base}/v1/chat/completions`, {
     method: "POST",
@@ -100,15 +145,9 @@ async function generarResumenConOpenAI(transcript) {
     body: JSON.stringify({
       model,
       temperature: 0.3,
-      max_tokens: 700,
+      max_tokens: maxTokens,
       messages: [
-        {
-          role: "system",
-          content:
-            "Eres un asistente que resume conversaciones comerciales por WhatsApp/chat. Responde SIEMPRE en español. " +
-            "Devuelve un resumen breve (5-10 frases máximo): intención del cliente, datos relevantes (modelo, precio, urgencia), " +
-            "acuerdos o siguientes pasos, y tono general. No inventes datos que no aparezcan en el texto.",
-        },
+        { role: "system", content: system },
         { role: "user", content: transcript },
       ],
     }),
@@ -217,7 +256,10 @@ app.get("/api/conversaciones", requireApiKey, async (req, res) => {
   const from = req.query.from;
   const to = req.query.to;
   const queryText = (req.query.q || "").toString().trim().toLowerCase();
-  const fetchSize = Math.min(offset + limit, 5000);
+  // Traemos una ventana amplia de mensajes para agrupar TODAS las
+  // conversaciones; el limit/offset se aplica luego sobre las sesiones
+  // agrupadas, no sobre los mensajes.
+  const fetchSize = 5000;
 
   if (from && !isValidDateInput(from)) {
     return res.status(400).json({ error: "Parametro 'from' invalido. Usa formato ISO 8601." });
@@ -275,16 +317,20 @@ app.get("/api/conversaciones", requireApiKey, async (req, res) => {
       return session.preview.toLowerCase().includes(queryText);
     });
 
-  const sessions = filteredSessions
+  const paged = filteredSessions
     .sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at))
-    .slice(offset, offset + limit)
-    .map((session) => ({
-      ...session,
-      date_range: {
-        from: session.first_message_at,
-        to: session.last_message_at,
-      },
-    }));
+    .slice(offset, offset + limit);
+
+  const clientes = await fetchClientesMap(paged.map((s) => s.phone).filter(Boolean));
+
+  const sessions = paged.map((session) => ({
+    ...session,
+    cliente: clientes[session.phone] || null,
+    date_range: {
+      from: session.first_message_at,
+      to: session.last_message_at,
+    },
+  }));
 
   return res.json({
     total: filteredSessions.length,
@@ -359,8 +405,11 @@ app.get("/api/conversaciones/:phone", requireApiKey, async (req, res) => {
     return res.status(500).json({ error: "Error consultando base de datos", detail: error.message });
   }
 
+  const clientes = await fetchClientesMap([phone]);
+
   return res.json({
     phone: phone,
+    cliente: clientes[phone] || null,
     message_count: (data || []).length,
     filters: {
       from: from || null,
@@ -517,6 +566,95 @@ app.post("/api/conversaciones/:phone/resumen", requireApiKey, async (req, res) =
       error: "Error generando resumen",
       detail: err.message || String(err),
     });
+  }
+});
+
+/**
+ * @openapi
+ * /api/resumen-semanal:
+ *   get:
+ *     tags: [Resúmenes]
+ *     summary: Resumen agregado + estadísticas de un rango (semana)
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: from
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: to
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Estadísticas y resumen IA de la semana
+ *       401:
+ *         description: No autorizado
+ */
+app.get("/api/resumen-semanal", requireApiKey, async (req, res) => {
+  const from = req.query.from;
+  const to = req.query.to;
+
+  if (from && !isValidDateInput(from)) {
+    return res.status(400).json({ error: "Parametro 'from' invalido. Usa formato ISO 8601." });
+  }
+  if (to && !isValidDateInput(to)) {
+    return res.status(400).json({ error: "Parametro 'to' invalido. Usa formato ISO 8601." });
+  }
+
+  try {
+    const { data, error } = await queryConversacionesDesencriptadas({
+      phone: null,
+      from,
+      to,
+      orderAsc: true,
+      limit: 5000,
+    });
+    if (error) {
+      return res.status(500).json({ error: "Error consultando base de datos", detail: error.message });
+    }
+
+    const rows = data || [];
+    const phones = new Set(rows.map((r) => r.phone).filter(Boolean));
+    const stats = {
+      conversaciones: phones.size,
+      mensajes: rows.length,
+      mensajes_cliente: rows.filter((r) => r.role === "user").length,
+      mensajes_agente: rows.filter((r) => r.role === "assistant").length,
+    };
+
+    if (!rows.length) {
+      return res.json({ stats, resumen: null, filters: { from: from || null, to: to || null } });
+    }
+
+    // Transcript agrupado por conversación (cap para no pasarnos de tokens)
+    const MAX_MSGS = 400;
+    const usados = rows.slice(0, MAX_MSGS);
+    const porTelefono = new Map();
+    for (const row of usados) {
+      const key = row.phone || "desconocido";
+      if (!porTelefono.has(key)) porTelefono.set(key, []);
+      const roleName = row.role === "user" ? "Cliente" : row.role === "assistant" ? "Agente" : row.role;
+      const msg = typeof row.message === "string" ? row.message : JSON.stringify(row.message);
+      porTelefono.get(key).push(`[${roleName}]: ${msg}`);
+    }
+    const transcript = [...porTelefono.entries()]
+      .map(([tel, msgs]) => `### Conversación ${tel}\n${msgs.join("\n")}`)
+      .join("\n\n");
+
+    const resumen = await generarResumenConOpenAI(transcript, {
+      system: SYSTEM_RESUMEN_SEMANAL,
+      maxTokens: 1000,
+    });
+
+    return res.json({
+      stats,
+      resumen,
+      truncado: rows.length > MAX_MSGS,
+      filters: { from: from || null, to: to || null },
+    });
+  } catch (err) {
+    console.error("Error generando resumen semanal:", err);
+    return res.status(500).json({ error: "Error generando resumen semanal", detail: err.message || String(err) });
   }
 });
 

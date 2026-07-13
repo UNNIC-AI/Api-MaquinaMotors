@@ -2,7 +2,8 @@
   "version": 2,
   "functions": {
     "api/index.js": {
-      "runtime": "@vercel/node"
+      "runtime": "@vercel/node",
+      "includeFiles": "public/**"
     }
   },
   "routes": [

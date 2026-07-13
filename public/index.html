@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Máquina Motors · Conversaciones</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+
+  <!-- ============ PANTALLA DE ACCESO ============ -->
+  <div id="login-screen" class="login-screen">
+    <form id="login-form" class="login-card" autocomplete="off">
+      <div class="login-mark"><span>MÁQUINA</span><span>MOTORS</span></div>
+      <p class="login-sub">Panel de conversaciones</p>
+      <label for="login-key">API key</label>
+      <input type="password" id="login-key" placeholder="Introduce tu API key" required />
+      <button type="submit" id="login-btn" class="btn-primary login-btn">Entrar</button>
+      <p id="login-error" class="login-error" hidden></p>
+    </form>
+    <p class="login-foot">Acceso restringido · UNNIC AI</p>
+  </div>
+
+  <!-- ============ APP ============ -->
+  <div id="app" class="app" hidden>
+
+    <!-- Barra lateral / menús -->
+    <aside class="sidebar">
+      <div class="side-brand"><span>MÁQUINA</span><strong>MOTORS</strong></div>
+      <nav class="side-nav">
+        <button class="nav-item active" data-view="conversaciones">
+          <span class="nav-dot"></span> Conversaciones
+        </button>
+        <button class="nav-item" data-view="resumenes">
+          <span class="nav-dot"></span> Resúmenes semanales
+        </button>
+      </nav>
+      <div class="side-spacer"></div>
+      <button id="logout-btn" class="btn-ghost side-logout">Salir</button>
+    </aside>
+
+    <div class="main">
+
+      <!-- ===== VISTA: CONVERSACIONES ===== -->
+      <section id="view-conversaciones" class="view">
+        <section class="filters">
+          <div class="field grow">
+            <label for="f-q">Buscar</label>
+            <input type="search" id="f-q" placeholder="Buscar en las conversaciones…" />
+          </div>
+          <div class="field">
+            <label for="f-from">Desde</label>
+            <input type="date" id="f-from" />
+          </div>
+          <div class="field">
+            <label for="f-to">Hasta</label>
+            <input type="date" id="f-to" />
+          </div>
+          <div class="filter-actions">
+            <button id="search-btn" class="btn-primary">Buscar</button>
+            <button id="clear-btn" class="btn-ghost">Limpiar</button>
+          </div>
+        </section>
+
+        <main class="layout">
+          <aside class="list-pane">
+            <div class="list-head">
+              <span id="list-count">—</span>
+              <button id="refresh-btn" class="btn-icon" title="Actualizar">↻</button>
+            </div>
+            <div id="list" class="list"></div>
+          </aside>
+
+          <section class="detail-pane" id="detail-pane">
+            <div id="detail-empty" class="detail-empty">
+              <div class="detail-empty-mark">MM</div>
+              <p>Selecciona una conversación para ver los mensajes</p>
+            </div>
+            <div id="detail" class="detail" hidden>
+              <div class="detail-head">
+                <button id="detail-back" class="btn-ghost detail-back">←</button>
+                <div id="detail-avatar" class="avatar"></div>
+                <div class="detail-title">
+                  <strong id="detail-phone">—</strong>
+                  <span id="detail-meta" class="detail-meta"></span>
+                </div>
+                <button id="summary-btn" class="btn-primary">Resumen IA</button>
+              </div>
+              <div id="summary-box" class="summary-box" hidden></div>
+              <div id="messages" class="messages"></div>
+            </div>
+          </section>
+        </main>
+      </section>
+
+      <!-- ===== VISTA: RESÚMENES SEMANALES ===== -->
+      <section id="view-resumenes" class="view" hidden>
+        <div class="view-head">
+          <h2>Resúmenes semanales</h2>
+          <div class="week-nav">
+            <button id="week-prev" class="btn-icon" title="Semana anterior">‹</button>
+            <span id="week-label" class="week-label">—</span>
+            <button id="week-next" class="btn-icon" title="Semana siguiente">›</button>
+            <button id="week-gen" class="btn-primary">Generar resumen</button>
+          </div>
+        </div>
+        <div class="resumen-scroll">
+          <div id="week-stats" class="stats-row"></div>
+          <div id="week-summary" class="week-summary">
+            <div class="placeholder">
+              <div class="detail-empty-mark">MM</div>
+              <p>Elige una semana y pulsa <strong>Generar resumen</strong>.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
