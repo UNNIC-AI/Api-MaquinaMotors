@@ -205,15 +205,13 @@ async function loadSessions() {
 function sessionCard(s) {
   const card = el("div", "session");
   card.dataset.phone = s.phone || "";
-  const name = s.cliente?.nombre || null;
-  card.appendChild(makeAvatar(s.phone, name));
+  card.appendChild(makeAvatar(s.phone));
 
   const body = el("div", "session-body");
   const top = el("div", "session-top");
-  top.appendChild(el("span", "session-phone", name || formatPhone(s.phone)));
+  top.appendChild(el("span", "session-phone", formatPhone(s.phone)));
   top.appendChild(el("span", "session-time", relativeTime(s.last_message_at)));
   body.appendChild(top);
-  if (name) body.appendChild(el("div", "session-sub", formatPhone(s.phone)));
   if (s.preview) body.appendChild(el("div", "session-preview", s.preview));
   body.appendChild(el("span", "session-badge", `${s.message_count} mensaje${s.message_count === 1 ? "" : "s"}`));
   card.appendChild(body);
@@ -262,17 +260,7 @@ async function openDetail(phone) {
   try {
     const data = await api(`/api/conversaciones/${encodeURIComponent(phone)}?${params}`);
     box.innerHTML = "";
-    const c = data.cliente || {};
-    if (c.nombre) {
-      av.textContent = avatarText(c.nombre, phone);
-      $("#detail-phone").textContent = c.nombre;
-    }
-    const meta = [];
-    if (c.nombre) meta.push(formatPhone(phone));
-    if (c.email) meta.push(c.email);
-    if (c.codigo_postal) meta.push("CP " + c.codigo_postal);
-    meta.push(`${data.message_count} mensajes`);
-    $("#detail-meta").textContent = meta.join("  ·  ");
+    $("#detail-meta").textContent = `${data.message_count} mensajes`;
     if (!data.messages.length) {
       box.appendChild(emptyState("Sin mensajes"));
       return;

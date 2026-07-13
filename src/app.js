@@ -89,28 +89,6 @@ async function queryConversacionesDesencriptadas({ phone, from, to, orderAsc, li
   return { data, error };
 }
 
-// Devuelve un mapa { phone -> {nombre, email, codigo_postal, last_seen} }
-async function fetchClientesMap(phones) {
-  let query = supabase.from("clientes").select("phone, nombre, email, codigo_postal, last_seen");
-  if (Array.isArray(phones) && phones.length) {
-    query = query.in("phone", phones);
-  }
-  const { data, error } = await query;
-  const map = {};
-  if (!error && Array.isArray(data)) {
-    for (const c of data) {
-      const clean = (v) => (v && v !== "None" ? v : null);
-      map[c.phone] = {
-        nombre: clean(c.nombre),
-        email: clean(c.email),
-        codigo_postal: clean(c.codigo_postal),
-        last_seen: c.last_seen || null,
-      };
-    }
-  }
-  return map;
-}
-
 const SYSTEM_RESUMEN_CONVERSACION =
   "Eres un asistente que resume conversaciones comerciales por WhatsApp/chat. Responde SIEMPRE en español. " +
   "Devuelve un resumen breve (5-10 frases máximo): intención del cliente, datos relevantes (modelo, precio, urgencia), " +
@@ -317,20 +295,16 @@ app.get("/api/conversaciones", requireApiKey, async (req, res) => {
       return session.preview.toLowerCase().includes(queryText);
     });
 
-  const paged = filteredSessions
+  const sessions = filteredSessions
     .sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at))
-    .slice(offset, offset + limit);
-
-  const clientes = await fetchClientesMap(paged.map((s) => s.phone).filter(Boolean));
-
-  const sessions = paged.map((session) => ({
-    ...session,
-    cliente: clientes[session.phone] || null,
-    date_range: {
-      from: session.first_message_at,
-      to: session.last_message_at,
-    },
-  }));
+    .slice(offset, offset + limit)
+    .map((session) => ({
+      ...session,
+      date_range: {
+        from: session.first_message_at,
+        to: session.last_message_at,
+      },
+    }));
 
   return res.json({
     total: filteredSessions.length,
@@ -405,11 +379,8 @@ app.get("/api/conversaciones/:phone", requireApiKey, async (req, res) => {
     return res.status(500).json({ error: "Error consultando base de datos", detail: error.message });
   }
 
-  const clientes = await fetchClientesMap([phone]);
-
   return res.json({
     phone: phone,
-    cliente: clientes[phone] || null,
     message_count: (data || []).length,
     filters: {
       from: from || null,
