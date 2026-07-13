@@ -89,42 +89,34 @@ async function queryConversacionesDesencriptadas({ phone, from, to, orderAsc, li
   return { data, error };
 }
 
-// Devuelve un mapa { phone -> {nombre, email, codigo_postal, last_seen} }
-async function fetchClientesMap(phones) {
-  let query = supabase.from("clientes").select("phone, nombre, email, codigo_postal, last_seen");
-  if (Array.isArray(phones) && phones.length) {
-    query = query.in("phone", phones);
-  }
-  const { data, error } = await query;
-  const map = {};
-  if (!error && Array.isArray(data)) {
-    for (const c of data) {
-      const clean = (v) => (v && v !== "None" ? v : null);
-      map[c.phone] = {
-        nombre: clean(c.nombre),
-        email: clean(c.email),
-        codigo_postal: clean(c.codigo_postal),
-        last_seen: c.last_seen || null,
-      };
-    }
-  }
-  return map;
-}
-
 const SYSTEM_RESUMEN_CONVERSACION =
   "Eres un asistente que resume conversaciones comerciales por WhatsApp/chat. Responde SIEMPRE en español. " +
   "Devuelve un resumen breve (5-10 frases máximo): intención del cliente, datos relevantes (modelo, precio, urgencia), " +
   "acuerdos o siguientes pasos, y tono general. No inventes datos que no aparezcan en el texto.";
 
 const SYSTEM_RESUMEN_SEMANAL =
-  "Eres un analista comercial de un concesionario de motos. Recibes las conversaciones de una semana entre clientes y el agente. " +
-  "Responde SIEMPRE en español, en formato claro con estas secciones (usa títulos en MAYÚSCULAS seguidos de dos puntos):\n" +
-  "RESUMEN GENERAL: 2-3 frases sobre la actividad de la semana.\n" +
-  "MODELOS MÁS CONSULTADOS: lista de motos/modelos mencionados y cuántas veces aprox.\n" +
-  "TEMAS RECURRENTES: precio, financiación, tasación, disponibilidad, etc.\n" +
-  "LEADS DESTACADOS: clientes con intención de compra clara y en qué punto están.\n" +
-  "RECOMENDACIONES: acciones sugeridas para el equipo comercial.\n" +
-  "No inventes datos que no aparezcan en el texto.";
+  "Eres un analista senior de calidad y experiencia de cliente de un concesionario de motos. Revisas TODAS las " +
+  "conversaciones de una semana entre los clientes y el agente automático (WhatsApp/chat) y redactas un informe " +
+  "profesional y ejecutivo para el responsable del negocio.\n\n" +
+  "Objetivo: explicar en conjunto cómo han ido las conversaciones de la semana e identificar qué situaciones se " +
+  "repiten (el clásico \"esto ha pasado a menudo\"), entender por qué ocurren, y distinguir qué conviene PROTEGER " +
+  "(lo que funciona bien) de qué conviene MEJORAR (lo que falla o frustra al cliente).\n\n" +
+  "FORMATO (muy importante):\n" +
+  "- Escribe en español, en prosa profesional, clara y directa, como un informe redactado por una persona.\n" +
+  "- PROHIBIDO usar Markdown o símbolos: nada de #, ##, *, **, comillas triples, backticks, emojis ni viñetas con guiones.\n" +
+  "- Organiza el informe en apartados. Cada apartado empieza con su título en una línea, en MAYÚSCULAS y sin símbolos, " +
+  "y debajo el contenido en frases completas. Si necesitas enumerar, usa frases separadas por punto y aparte.\n\n" +
+  "Apartados, en este orden:\n" +
+  "RESUMEN DE LA SEMANA\n" +
+  "Un párrafo sobre el volumen de conversaciones, el tipo de clientes y el tono general: cómo han ido en conjunto.\n\n" +
+  "LO QUE MAS SE REPITE\n" +
+  "Describe las situaciones recurrentes (consultas, objeciones, peticiones, puntos donde el cliente se atasca o el " +
+  "agente no resuelve). Para cada una indica con qué frecuencia aproximada aparece y por qué crees que ocurre.\n\n" +
+  "QUE CONVIENE PROTEGER\n" +
+  "Lo que el agente hace bien y da buenos resultados, que no habría que tocar.\n\n" +
+  "QUE CONVIENE MEJORAR\n" +
+  "Recomendaciones concretas y accionables, ordenadas por impacto, para mejorar el agente y el proceso comercial.\n\n" +
+  "Cuantifica cuando puedas (número de veces o de clientes). No inventes nada que no aparezca en las conversaciones.";
 
 async function generarResumenConOpenAI(transcript, opts = {}) {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -170,7 +162,20 @@ async function generarResumenConOpenAI(transcript, opts = {}) {
   if (!text) {
     throw new Error("El modelo no devolvio texto de resumen");
   }
-  return text;
+  return limpiarMarkdown(text);
+}
+
+// Quita restos de Markdown/símbolos por si el modelo los cuela
+function limpiarMarkdown(t) {
+  return String(t || "")
+    .replace(/^#{1,6}\s*/gm, "")        // encabezados ###
+    .replace(/\*\*(.*?)\*\*/g, "$1")    // **negrita**
+    .replace(/__(.*?)__/g, "$1")        // __negrita__
+    .replace(/`+/g, "")                 // backticks
+    .replace(/^\s*[-*•]\s+/gm, "")      // viñetas al inicio de línea
+    .replace(/\*/g, "")                 // asteriscos sueltos
+    .replace(/\n{3,}/g, "\n\n")         // exceso de saltos de línea
+    .trim();
 }
 
 /**
@@ -317,20 +322,16 @@ app.get("/api/conversaciones", requireApiKey, async (req, res) => {
       return session.preview.toLowerCase().includes(queryText);
     });
 
-  const paged = filteredSessions
+  const sessions = filteredSessions
     .sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at))
-    .slice(offset, offset + limit);
-
-  const clientes = await fetchClientesMap(paged.map((s) => s.phone).filter(Boolean));
-
-  const sessions = paged.map((session) => ({
-    ...session,
-    cliente: clientes[session.phone] || null,
-    date_range: {
-      from: session.first_message_at,
-      to: session.last_message_at,
-    },
-  }));
+    .slice(offset, offset + limit)
+    .map((session) => ({
+      ...session,
+      date_range: {
+        from: session.first_message_at,
+        to: session.last_message_at,
+      },
+    }));
 
   return res.json({
     total: filteredSessions.length,
@@ -405,11 +406,8 @@ app.get("/api/conversaciones/:phone", requireApiKey, async (req, res) => {
     return res.status(500).json({ error: "Error consultando base de datos", detail: error.message });
   }
 
-  const clientes = await fetchClientesMap([phone]);
-
   return res.json({
     phone: phone,
-    cliente: clientes[phone] || null,
     message_count: (data || []).length,
     filters: {
       from: from || null,
@@ -569,93 +567,123 @@ app.post("/api/conversaciones/:phone/resumen", requireApiKey, async (req, res) =
   }
 });
 
+// Genera el análisis de una semana: estadísticas + texto IA. No guarda nada.
+async function generarAnalisisSemanal({ from, to }) {
+  const { data, error } = await queryConversacionesDesencriptadas({
+    phone: null,
+    from,
+    to,
+    orderAsc: true,
+    limit: 5000,
+  });
+  if (error) throw new Error(error.message);
+
+  const rows = data || [];
+  const phones = new Set(rows.map((r) => r.phone).filter(Boolean));
+  const stats = {
+    conversaciones: phones.size,
+    mensajes: rows.length,
+    mensajes_cliente: rows.filter((r) => r.role === "user").length,
+    mensajes_agente: rows.filter((r) => r.role === "assistant").length,
+  };
+  if (!rows.length) return { stats, resumen: null, truncado: false };
+
+  const MAX_MSGS = 400;
+  const usados = rows.slice(0, MAX_MSGS);
+  const porTelefono = new Map();
+  for (const row of usados) {
+    const key = row.phone || "desconocido";
+    if (!porTelefono.has(key)) porTelefono.set(key, []);
+    const roleName = row.role === "user" ? "Cliente" : row.role === "assistant" ? "Agente" : row.role;
+    const msg = typeof row.message === "string" ? row.message : JSON.stringify(row.message);
+    porTelefono.get(key).push(`[${roleName}]: ${msg}`);
+  }
+  const transcript = [...porTelefono.entries()]
+    .map(([tel, msgs]) => `=== Conversación ${tel} ===\n${msgs.join("\n")}`)
+    .join("\n\n");
+
+  const contexto =
+    `DATOS EXACTOS DE LA SEMANA (usa estas cifras, no las estimes):\n` +
+    `- Conversaciones distintas: ${stats.conversaciones}\n` +
+    `- Mensajes totales: ${stats.mensajes} (del cliente: ${stats.mensajes_cliente}, del agente: ${stats.mensajes_agente})\n\n` +
+    `CONVERSACIONES DE LA SEMANA:\n${transcript}`;
+
+  const resumen = await generarResumenConOpenAI(contexto, {
+    system: SYSTEM_RESUMEN_SEMANAL,
+    maxTokens: 1400,
+  });
+  return { stats, resumen, truncado: rows.length > MAX_MSGS };
+}
+
 /**
  * @openapi
- * /api/resumen-semanal:
+ * /api/resumenes-semanales:
  *   get:
  *     tags: [Resúmenes]
- *     summary: Resumen agregado + estadísticas de un rango (semana)
- *     security:
- *       - ApiKeyAuth: []
+ *     summary: Lista los análisis guardados de una semana
+ *     security: [{ ApiKeyAuth: [] }]
  *     parameters:
- *       - in: query
- *         name: from
- *         schema: { type: string, format: date-time }
- *       - in: query
- *         name: to
- *         schema: { type: string, format: date-time }
- *     responses:
- *       200:
- *         description: Estadísticas y resumen IA de la semana
- *       401:
- *         description: No autorizado
+ *       - { in: query, name: from, schema: { type: string, format: date-time } }
+ *       - { in: query, name: to, schema: { type: string, format: date-time } }
+ *   post:
+ *     tags: [Resúmenes]
+ *     summary: Genera y GUARDA un análisis de la semana (permite varios por semana)
+ *     security: [{ ApiKeyAuth: [] }]
  */
-app.get("/api/resumen-semanal", requireApiKey, async (req, res) => {
-  const from = req.query.from;
-  const to = req.query.to;
+app.get("/api/resumenes-semanales", requireApiKey, async (req, res) => {
+  const { from, to } = req.query;
+  if (from && !isValidDateInput(from)) return res.status(400).json({ error: "Parametro 'from' invalido." });
+  if (to && !isValidDateInput(to)) return res.status(400).json({ error: "Parametro 'to' invalido." });
 
-  if (from && !isValidDateInput(from)) {
-    return res.status(400).json({ error: "Parametro 'from' invalido. Usa formato ISO 8601." });
+  let query = supabase
+    .from("resumenes_semanales")
+    .select("id, semana_from, semana_to, stats, resumen, created_at")
+    .order("created_at", { ascending: false });
+  if (from) query = query.eq("semana_from", from);
+  if (to) query = query.eq("semana_to", to);
+
+  const { data, error } = await query;
+  if (error) {
+    return res.status(500).json({ error: "Error consultando análisis guardados", detail: error.message });
   }
-  if (to && !isValidDateInput(to)) {
-    return res.status(400).json({ error: "Parametro 'to' invalido. Usa formato ISO 8601." });
+  return res.json({ data: data || [], filters: { from: from || null, to: to || null } });
+});
+
+app.post("/api/resumenes-semanales", requireApiKey, async (req, res) => {
+  const from = req.body?.from || req.query.from;
+  const to = req.body?.to || req.query.to;
+  if (!from || !isValidDateInput(from) || !to || !isValidDateInput(to)) {
+    return res.status(400).json({ error: "Faltan 'from'/'to' válidos (ISO 8601) para la semana." });
   }
 
   try {
-    const { data, error } = await queryConversacionesDesencriptadas({
-      phone: null,
-      from,
-      to,
-      orderAsc: true,
-      limit: 5000,
-    });
+    const analisis = await generarAnalisisSemanal({ from, to });
+    if (!analisis.resumen) {
+      return res.status(404).json({ error: "No hubo actividad esa semana, no se ha guardado nada.", stats: analisis.stats });
+    }
+
+    const { data, error } = await supabase
+      .from("resumenes_semanales")
+      .insert({ semana_from: from, semana_to: to, stats: analisis.stats, resumen: analisis.resumen })
+      .select("id, semana_from, semana_to, stats, resumen, created_at")
+      .single();
+
     if (error) {
-      return res.status(500).json({ error: "Error consultando base de datos", detail: error.message });
+      return res.status(500).json({ error: "Error guardando el análisis", detail: error.message });
     }
-
-    const rows = data || [];
-    const phones = new Set(rows.map((r) => r.phone).filter(Boolean));
-    const stats = {
-      conversaciones: phones.size,
-      mensajes: rows.length,
-      mensajes_cliente: rows.filter((r) => r.role === "user").length,
-      mensajes_agente: rows.filter((r) => r.role === "assistant").length,
-    };
-
-    if (!rows.length) {
-      return res.json({ stats, resumen: null, filters: { from: from || null, to: to || null } });
-    }
-
-    // Transcript agrupado por conversación (cap para no pasarnos de tokens)
-    const MAX_MSGS = 400;
-    const usados = rows.slice(0, MAX_MSGS);
-    const porTelefono = new Map();
-    for (const row of usados) {
-      const key = row.phone || "desconocido";
-      if (!porTelefono.has(key)) porTelefono.set(key, []);
-      const roleName = row.role === "user" ? "Cliente" : row.role === "assistant" ? "Agente" : row.role;
-      const msg = typeof row.message === "string" ? row.message : JSON.stringify(row.message);
-      porTelefono.get(key).push(`[${roleName}]: ${msg}`);
-    }
-    const transcript = [...porTelefono.entries()]
-      .map(([tel, msgs]) => `### Conversación ${tel}\n${msgs.join("\n")}`)
-      .join("\n\n");
-
-    const resumen = await generarResumenConOpenAI(transcript, {
-      system: SYSTEM_RESUMEN_SEMANAL,
-      maxTokens: 1000,
-    });
-
-    return res.json({
-      stats,
-      resumen,
-      truncado: rows.length > MAX_MSGS,
-      filters: { from: from || null, to: to || null },
-    });
+    return res.json({ ...data, truncado: analisis.truncado });
   } catch (err) {
-    console.error("Error generando resumen semanal:", err);
-    return res.status(500).json({ error: "Error generando resumen semanal", detail: err.message || String(err) });
+    console.error("Error generando análisis semanal:", err);
+    return res.status(500).json({ error: "Error generando análisis semanal", detail: err.message || String(err) });
   }
+});
+
+app.delete("/api/resumenes-semanales/:id", requireApiKey, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
+  const { error } = await supabase.from("resumenes_semanales").delete().eq("id", id);
+  if (error) return res.status(500).json({ error: "Error borrando", detail: error.message });
+  return res.json({ ok: true });
 });
 
 const swaggerSpec = swaggerJSDoc({
