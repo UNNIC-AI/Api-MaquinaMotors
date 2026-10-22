@@ -6,6 +6,10 @@ const { Pool } = require("pg");
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : false,
+  // El panel manda las fechas sin zona horaria (p. ej. "2026-07-13T00:00:00") y
+  // los análisis guardados están en UTC, como funcionaba con Supabase. Sin esto,
+  // un Postgres en hora de Madrid las desplaza dos horas y no encuentra la semana.
+  options: "-c TimeZone=UTC",
   max: Number(process.env.DATABASE_POOL_MAX) || 5,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,
