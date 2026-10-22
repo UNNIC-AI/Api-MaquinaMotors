@@ -4,21 +4,16 @@ API y panel web para revisar y auditar las conversaciones del agente de WhatsApp
 
 Lee directamente del Postgres donde n8n guarda las conversaciones (cifradas con `pgp_sym_encrypt`), las descifra en la propia base de datos y las muestra sin exponer las credenciales de la base de datos a quien usa el panel.
 
+Este es el repositorio del **código**. Al cliente no se le entrega: se le entrega un build minificado (ver "Generar el entregable") que se instala con el repositorio **maquinamotors_deploy**, donde está la guía de instalación y la de uso.
+
 ## Qué hace
 
-- Listado de conversaciones agrupadas por teléfono, con vista previa del último mensaje del cliente.
+- Listado de conversaciones agrupadas por teléfono, con vista previa del último mensaje del cliente y "Cargar más".
 - Búsqueda por texto en todos los mensajes o por teléfono (con o sin `+34`, con espacios…).
-- Filtros por fechas y paginación.
-- Detalle de cada conversación.
-- Resumen con IA de una conversación y análisis semanal guardable (opcional, con OpenAI).
+- Filtros por fechas (en la hora local del navegador) y detalle de cada conversación completa.
+- Resumen con IA de los últimos mensajes de una conversación y análisis semanal guardable (opcional, con OpenAI).
 - Documentación interactiva de la API en `/docs` (Swagger).
 - Acceso con API key, cabeceras de seguridad (Helmet) y límite de 120 peticiones por minuto.
-
-## Instalación en el servidor
-
-Ver [INSTALACION.md](./INSTALACION.md): base de datos, variables, Docker y cómo dejarlo accesible solo por la VPN.
-
-Uso del panel y de la API: [INSTRUCCIONES_CLIENTE.md](./INSTRUCCIONES_CLIENTE.md).
 
 ## Desarrollo en local
 
@@ -30,7 +25,22 @@ cp .env.example .env     # rellena DATABASE_URL, ENCRYPTION_KEY y API_ACCESS_KEY
 npm run dev              # http://localhost:3000 · Swagger en /docs
 ```
 
-La base de datos necesita lo que crea `sql/instalar_panel.sql` (ver INSTALACION.md).
+La base de datos necesita la tabla `conversaciones` de n8n, la función `try_decrypt(bytea, text[])` y la tabla `resumenes_semanales` (en la base de datos de Máquina Motors ya existen).
+
+## Generar el entregable
+
+```bash
+npm run release          # → release/panel-maquinamotors-<versión>.zip
+```
+
+Genera `dist/` y lo comprime. Dentro va:
+
+- `src/server.js`: el servidor (`src/*.js`) empaquetado en un solo fichero y minificado, sin comentarios.
+- `src/swagger.json`: la documentación de la API, generada en el build (los comentarios `@openapi` no sobreviven al minificado).
+- `public/`: el panel con el JS y el CSS minificados.
+- `package.json`, `package-lock.json`, `Dockerfile`: para que Docker instale las dependencias y lo arranque.
+
+Antes de una entrega nueva, sube `version` en `package.json` para que el zip lleve otro número. `npm run build` genera solo `dist/`, sin comprimir.
 
 ## Variables de entorno
 
@@ -54,10 +64,10 @@ src/
   db.js       Conexión a Postgres
   server.js   Arranque
 public/       Panel web (HTML, CSS y JS sin dependencias)
-sql/
-  instalar_panel.sql   Lo que necesita el panel en la base de datos de n8n
-Dockerfile
-docker-compose.example.yml
+scripts/
+  build.js    Genera dist/ (build minificado)
+  release.js  Genera el zip del entregable
+Dockerfile    El mismo para desarrollo y para el build
 ```
 
 ## Seguridad
@@ -65,4 +75,4 @@ docker-compose.example.yml
 - Solo quien tenga `API_ACCESS_KEY` puede leer conversaciones. La clave se compara en tiempo constante y el panel la guarda en `sessionStorage` (se borra al cerrar la pestaña).
 - Las credenciales de la base de datos y la clave de cifrado solo están en el servidor.
 - El panel debe quedar accesible solo por la red interna o la VPN: muestra datos personales de clientes.
-- Con un usuario de base de datos propio (ver `sql/instalar_panel.sql`), el panel solo puede leer `conversaciones` y gestionar `resumenes_semanales`.
+- Con un usuario de base de datos propio (ver la guía de maquinamotors_deploy), el panel solo puede leer `conversaciones` y gestionar `resumenes_semanales`.

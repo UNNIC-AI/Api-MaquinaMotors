@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "echo \"Sin tests configurados\""
+    "build": "node scripts/build.js",
+    "release": "node scripts/release.js"
   },
   "repository": {
     "type": "git",
@@ -33,5 +34,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
   }
 }

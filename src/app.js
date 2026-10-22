@@ -747,7 +747,10 @@ app.delete("/api/resumenes-semanales/:id", requireApiKey, async (req, res) => {
   return res.json({ ok: true });
 });
 
-const swaggerSpec = swaggerJSDoc({
+// En el build minificado no quedan los comentarios @openapi, así que la
+// documentación se genera antes (scripts/build.js) y se lee de swagger.json.
+const swaggerJson = path.join(__dirname, "swagger.json");
+const swaggerSpec = require("fs").existsSync(swaggerJson) ? require(swaggerJson) : swaggerJSDoc({
   definition: {
     openapi: "3.0.3",
     info: {
@@ -767,6 +770,7 @@ const swaggerSpec = swaggerJSDoc({
   },
   apis: [__filename],
 });
+app.locals.swaggerSpec = swaggerSpec; // lo lee scripts/build.js para generar swagger.json
 
 app.use(
   "/docs",
