@@ -1,191 +1,68 @@
-# API Maquina Motors
+# Panel de conversaciones · Máquina Motors
 
-API REST para consultar conversaciones del agente comercial de manera segura, sin exponer credenciales de base de datos.
+API y panel web para revisar y auditar las conversaciones del agente de WhatsApp de Máquina Motors.
 
-## 🚀 Características
+Lee directamente del Postgres donde n8n guarda las conversaciones (cifradas con `pgp_sym_encrypt`), las descifra en la propia base de datos y las muestra sin exponer las credenciales de la base de datos a quien usa el panel.
 
-- Listado de conversaciones agrupadas por teléfono
-- Detalle completo de mensajes por conversación
-- Filtros por fecha y búsqueda de texto
-- Autenticación segura con API key
-- Documentación interactiva con Swagger
-- Rate limiting y seguridad CORS
+## Qué hace
 
-## 📋 Requisitos
+- Listado de conversaciones agrupadas por teléfono, con vista previa del último mensaje del cliente.
+- Búsqueda por texto en todos los mensajes o por teléfono (con o sin `+34`, con espacios…).
+- Filtros por fechas y paginación.
+- Detalle de cada conversación.
+- Resumen con IA de una conversación y análisis semanal guardable (opcional, con OpenAI).
+- Documentación interactiva de la API en `/docs` (Swagger).
+- Acceso con API key, cabeceras de seguridad (Helmet) y límite de 120 peticiones por minuto.
 
-- Node.js 20+
-- Cuenta de Supabase con tabla `conversaciones`
+## Instalación en el servidor
 
-## 🔧 Instalación
+Ver [INSTALACION.md](./INSTALACION.md): base de datos, variables, Docker y cómo dejarlo accesible solo por la VPN.
+
+Uso del panel y de la API: [INSTRUCCIONES_CLIENTE.md](./INSTRUCCIONES_CLIENTE.md).
+
+## Desarrollo en local
+
+Requisitos: Node.js 20 o superior y acceso a un Postgres con la tabla `conversaciones` de n8n (o una copia de prueba).
 
 ```bash
-# Clonar repositorio
-git clone https://github.com/TU-USUARIO/Api-MaquinaMotors.git
-cd Api-MaquinaMotors
-
-# Instalar dependencias
 npm install
-
-# Configurar variables de entorno
-cp .env.example .env
-# Edita .env con tus credenciales
+cp .env.example .env     # rellena DATABASE_URL, ENCRYPTION_KEY y API_ACCESS_KEY
+npm run dev              # http://localhost:3000 · Swagger en /docs
 ```
 
-## ⚙️ Configuración
+La base de datos necesita lo que crea `sql/instalar_panel.sql` (ver INSTALACION.md).
 
-Completa el archivo `.env` con:
+## Variables de entorno
 
-```env
-PORT=3000
-SUPABASE_URL=tu_url_de_supabase
-SUPABASE_SERVICE_ROLE_KEY=tu_service_role_key
-API_ACCESS_KEY=genera_una_clave_segura
-CORS_ORIGINS=http://localhost:3000
+| Variable | Obligatoria | Para qué |
+|---|---|---|
+| `DATABASE_URL` | Sí | Conexión al Postgres de n8n. |
+| `ENCRYPTION_KEY` | Sí | Clave (o claves separadas por comas) con la que n8n cifra los mensajes. |
+| `API_ACCESS_KEY` | Sí | Clave para entrar al panel y usar la API. |
+| `DATABASE_SSL` | No | `true` si Postgres exige conexión cifrada. |
+| `DATABASE_POOL_MAX` | No | Conexiones simultáneas a Postgres (por defecto 5). |
+| `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` | No | Resúmenes con IA. Envía el texto de las conversaciones a OpenAI. |
+| `CORS_ORIGINS` | No | Solo si otra web distinta del panel llama a la API. |
+| `TRUST_PROXY` | No | `1` detrás de un proxy inverso. |
+| `PORT`, `NODE_ENV` | No | Puerto (3000) y modo. En `production` no se devuelven al navegador los detalles de los errores de Postgres. |
 
-# Opcional: para endpoint de resumen con IA
-OPENAI_API_KEY=sk-tu-clave-openai
-OPENAI_MODEL=gpt-4o-mini
-```
-
-## 🏃 Ejecución
-
-```bash
-# Desarrollo (con hot reload)
-npm run dev
-
-# Producción
-npm start
-```
-
-La API estará disponible en `http://localhost:3000`
-
-## 📚 Documentación
-
-Accede a Swagger UI en: `http://localhost:3000/docs`
-
-### Endpoints principales
-
-#### `GET /api/health`
-Estado del servicio (público)
-
-#### `GET /api/conversaciones`
-Lista conversaciones agrupadas por teléfono
-
-**Parámetros opcionales:**
-- `limit` - Máximo de resultados (1-200, default: 50)
-- `offset` - Desplazamiento para paginación
-- `from` - Fecha inicio (ISO 8601)
-- `to` - Fecha fin (ISO 8601)
-- `q` - Búsqueda de texto
-
-**Ejemplo:**
-```bash
-curl -H "x-api-key: TU_CLAVE" \
-  "http://localhost:3000/api/conversaciones?limit=20&q=precio"
-```
-
-#### `GET /api/conversaciones/:phone`
-Detalle de mensajes de un teléfono específico
-
-**Parámetros opcionales:**
-- `from` - Fecha inicio
-- `to` - Fecha fin
-
-**Ejemplo:**
-```bash
-curl -H "x-api-key: TU_CLAVE" \
-  "http://localhost:3000/api/conversaciones/34612345678"
-```
-
-#### `POST /api/conversaciones/:phone/resumen`
-Genera un resumen automático de la conversación con IA
-
-**Body opcional (JSON):**
-```json
-{
-  "from": "2026-04-01T00:00:00Z",
-  "to": "2026-04-30T23:59:59Z",
-  "max_messages": 100
-}
-```
-
-**Ejemplos:**
-
-Sin body (usa defaults, trae últimos 100 mensajes):
-```bash
-curl -X POST \
-  -H "x-api-key: TU_CLAVE" \
-  -H "Content-Type: application/json" \
-  -d '{}' \
-  "http://localhost:3000/api/conversaciones/34612345678/resumen"
-```
-
-Con parámetros en el body:
-```bash
-curl -X POST \
-  -H "x-api-key: TU_CLAVE" \
-  -H "Content-Type: application/json" \
-  -d '{"max_messages": 50}' \
-  "http://localhost:3000/api/conversaciones/34612345678/resumen"
-```
-
-O con query string (sin body):
-```bash
-curl -X POST \
-  -H "x-api-key: TU_CLAVE" \
-  "http://localhost:3000/api/conversaciones/34612345678/resumen?max_messages=50"
-```
-
-**Nota:** Requiere `OPENAI_API_KEY` configurada en variables de entorno.
-
-## 🔐 Autenticación
-
-Todos los endpoints (excepto `/api/health`) requieren el header:
-
-```http
-x-api-key: TU_API_ACCESS_KEY
-```
-
-En Swagger, usa el botón **Authorize** para configurar tu clave.
-
-## 🚢 Deploy en Vercel
-
-1. Importa el proyecto en [Vercel](https://vercel.com)
-2. Configura las variables de entorno
-3. Deploy automático
-
-Ver guía completa en [DEPLOY_VERCEL.md](./DEPLOY_VERCEL.md)
-
-## 📁 Estructura del proyecto
+## Estructura
 
 ```
-Api-MaquinaMotors/
-├── api/
-│   └── index.js          # Entry point serverless (Vercel)
-├── src/
-│   ├── app.js            # Configuración de Express
-│   └── server.js         # Servidor local
-├── .env.example          # Template de variables
-├── vercel.json           # Config de Vercel
-└── package.json
+src/
+  app.js      API (Express) y consultas
+  db.js       Conexión a Postgres
+  server.js   Arranque
+public/       Panel web (HTML, CSS y JS sin dependencias)
+sql/
+  instalar_panel.sql   Lo que necesita el panel en la base de datos de n8n
+Dockerfile
+docker-compose.example.yml
 ```
 
-## 🛡️ Seguridad
+## Seguridad
 
-- ✅ Helmet para headers seguros
-- ✅ Rate limiting (120 req/min)
-- ✅ CORS configurable
-- ✅ API key en servidor (nunca expuesta)
-- ✅ Validación de parámetros
-
-## 📝 Licencia
-
-ISC
-
-## 🤝 Soporte
-
-Para dudas o problemas, abre un issue en este repositorio.
-
----
-
-**Importante:** Nunca compartas tu `SUPABASE_SERVICE_ROLE_KEY` públicamente. Solo comparte `API_ACCESS_KEY` con clientes autorizados.
+- Solo quien tenga `API_ACCESS_KEY` puede leer conversaciones. La clave se compara en tiempo constante y el panel la guarda en `sessionStorage` (se borra al cerrar la pestaña).
+- Las credenciales de la base de datos y la clave de cifrado solo están en el servidor.
+- El panel debe quedar accesible solo por la red interna o la VPN: muestra datos personales de clientes.
+- Con un usuario de base de datos propio (ver `sql/instalar_panel.sql`), el panel solo puede leer `conversaciones` y gestionar `resumenes_semanales`.

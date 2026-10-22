@@ -8,36 +8,41 @@ const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
 const swaggerUi = require("swagger-ui-express");
 const swaggerJSDoc = require("swagger-jsdoc");
-const { createClient } = require("@supabase/supabase-js");
+const crypto = require("crypto");
+const { query } = require("./db");
 
 const app = express();
 
-const requiredEnv = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "API_ACCESS_KEY", "ENCRYPTION_KEY"];
+const requiredEnv = ["DATABASE_URL", "API_ACCESS_KEY", "ENCRYPTION_KEY"];
 for (const key of requiredEnv) {
   if (!process.env[key]) {
     throw new Error(`Falta variable de entorno requerida: ${key}`);
   }
 }
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY,
-  { auth: { persistSession: false } }
-);
+// Claves con las que n8n cifra conversaciones.message (pgp_sym_encrypt).
+// Puede haber varias separadas por comas: se prueban en orden.
+const ENCRYPTION_KEYS = process.env.ENCRYPTION_KEY.split(",").map((k) => k.trim()).filter(Boolean);
 
 const corsOrigins = (process.env.CORS_ORIGINS || "")
   .split(",")
   .map((v) => v.trim())
   .filter(Boolean);
 
+// Detrás de un proxy inverso (nginx, Traefik…) hace falta para que el límite
+// de peticiones vea la IP real del usuario y no la del proxy.
+if (process.env.TRUST_PROXY) {
+  app.set("trust proxy", Number(process.env.TRUST_PROXY) || process.env.TRUST_PROXY);
+}
+
 app.use(helmet());
 app.use(express.json({ limit: "1mb" }));
 app.use(morgan("combined"));
-app.use(
-  corsOrigins.length
-    ? cors({ origin: corsOrigins })
-    : cors()
-);
+// El panel se sirve desde el mismo origen que la API, así que por defecto no
+// se abre CORS. Solo hace falta si otra web va a llamar a la API.
+if (corsOrigins.length) {
+  app.use(cors({ origin: corsOrigins }));
+}
 
 const limiter = rateLimit({
   windowMs: 60 * 1000,
@@ -62,14 +67,30 @@ function requireApiKey(req, res, next) {
     });
   }
   
-  if (incoming !== process.env.API_ACCESS_KEY) {
-    return res.status(401).json({ 
-      error: "No autorizado", 
-      message: "La API key proporcionada es incorrecta. Verifica que sea la correcta." 
+  if (!sameSecret(incoming, process.env.API_ACCESS_KEY)) {
+    return res.status(401).json({
+      error: "No autorizado",
+      message: "La API key proporcionada es incorrecta. Verifica que sea la correcta."
     });
   }
-  
+
   next();
+}
+
+// Compara en tiempo constante para no dar pistas sobre la clave por lo que tarda.
+function sameSecret(a, b) {
+  const ha = crypto.createHash("sha256").update(String(a)).digest();
+  const hb = crypto.createHash("sha256").update(String(b)).digest();
+  return crypto.timingSafeEqual(ha, hb);
+}
+
+// En producción no se devuelve al navegador el texto de los errores de Postgres
+// ni de conexión (llevan tablas, host y puerto). Se reconocen porque traen
+// `code`; los errores propios del panel (p. ej. falta OPENAI_API_KEY) no.
+function errorDetail(err) {
+  console.error(err);
+  if (process.env.NODE_ENV === "production" && err && err.code) return undefined;
+  return err.message || String(err);
 }
 
 function isValidDateInput(value) {
@@ -77,16 +98,74 @@ function isValidDateInput(value) {
   return !Number.isNaN(new Date(value).getTime());
 }
 
+// Mensajes descifrados de conversaciones, filtrados por teléfono y fechas.
 async function queryConversacionesDesencriptadas({ phone, from, to, orderAsc, limit }) {
-  const { data, error } = await supabase.rpc("get_conversaciones_decrypted", {
-    enc_key: process.env.ENCRYPTION_KEY,
-    filter_phone: phone || null,
-    filter_from: from || null,
-    filter_to: to || null,
-    order_asc: orderAsc ?? false,
-    limit_count: limit ?? 5000,
-  });
-  return { data, error };
+  return query(
+    `SELECT c.id, c.phone, c.role, public.try_decrypt(c.message, $1::text[]) AS message,
+            c.procesado, c."timestamp"
+       FROM public.conversaciones c
+      WHERE ($2::text IS NULL OR c.phone = $2)
+        AND ($3::timestamptz IS NULL OR c."timestamp" >= $3)
+        AND ($4::timestamptz IS NULL OR c."timestamp" <= $4)
+      ORDER BY c."timestamp" ${orderAsc ? "ASC" : "DESC"}
+      LIMIT $5`,
+    [ENCRYPTION_KEYS, phone || null, from || null, to || null, limit ?? 5000]
+  );
+}
+
+// Una fila por teléfono. Se agrupa en Postgres y solo se descifra el último
+// mensaje del cliente (para la vista previa); si hay búsqueda de texto, se
+// descifra lo necesario para buscar en todos los mensajes del rango.
+async function queryListadoConversaciones({ from, to, q, limit, offset }) {
+  const texto = q || null;
+  const digitos = q ? q.replace(/\D/g, "").replace(/^34/, "") : "";
+  return query(
+    `WITH rango AS (
+       SELECT id, phone, role, "timestamp"
+         FROM public.conversaciones
+        WHERE ($2::timestamptz IS NULL OR "timestamp" >= $2)
+          AND ($3::timestamptz IS NULL OR "timestamp" <= $3)
+     ),
+     sesiones AS (
+       SELECT phone, min("timestamp") AS first_message_at, max("timestamp") AS last_message_at,
+              count(*)::int AS message_count
+         FROM rango
+        GROUP BY phone
+     ),
+     coincidencias AS (
+       SELECT DISTINCT r.phone
+         FROM rango r
+         JOIN public.conversaciones c ON c.id = r.id
+        WHERE $4::text IS NOT NULL
+          AND public.try_decrypt(c.message, $1::text[]) ILIKE '%' || $4 || '%'
+     ),
+     filtradas AS (
+       SELECT s.*
+         FROM sesiones s
+        WHERE $4::text IS NULL
+           OR s.phone IN (SELECT phone FROM coincidencias)
+           OR (length($5) >= 3 AND regexp_replace(s.phone, '\\D', '', 'g') LIKE '%' || $5 || '%')
+     ),
+     pagina AS (
+       SELECT f.*, count(*) OVER ()::int AS total
+         FROM filtradas f
+        ORDER BY f.last_message_at DESC
+        LIMIT $6 OFFSET $7
+     ),
+     ultimo_cliente AS (
+       SELECT DISTINCT ON (r.phone) r.phone, r.id
+         FROM rango r
+        WHERE r.role = 'user' AND r.phone IN (SELECT phone FROM pagina)
+        ORDER BY r.phone, r."timestamp" DESC
+     )
+     SELECT p.phone, p.first_message_at, p.last_message_at, p.message_count, p.total,
+            left(public.try_decrypt(c.message, $1::text[]), 120) AS preview
+       FROM pagina p
+       LEFT JOIN ultimo_cliente u ON u.phone = p.phone
+       LEFT JOIN public.conversaciones c ON c.id = u.id
+      ORDER BY p.last_message_at DESC`,
+    [ENCRYPTION_KEYS, from || null, to || null, texto, digitos, limit, offset]
+  );
 }
 
 const SYSTEM_RESUMEN_CONVERSACION =
@@ -183,13 +262,21 @@ function limpiarMarkdown(t) {
  * /api/health:
  *   get:
  *     tags: [Sistema]
- *     summary: Estado del servicio
+ *     summary: Estado del servicio y de la conexión con la base de datos
  *     responses:
  *       200:
  *         description: Servicio operativo
+ *       503:
+ *         description: Sin conexión con Postgres
  */
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, service: "api-maquinamotors" });
+app.get("/api/health", async (_req, res) => {
+  try {
+    await query("SELECT 1");
+    res.json({ ok: true, service: "api-maquinamotors", database: "ok" });
+  } catch (err) {
+    console.error("Health: sin conexión con Postgres:", err.message);
+    res.status(503).json({ ok: false, service: "api-maquinamotors", database: "sin conexión" });
+  }
 });
 
 /**
@@ -260,11 +347,7 @@ app.get("/api/conversaciones", requireApiKey, async (req, res) => {
   const offset = Math.max(Number(req.query.offset) || 0, 0);
   const from = req.query.from;
   const to = req.query.to;
-  const queryText = (req.query.q || "").toString().trim().toLowerCase();
-  // Traemos una ventana amplia de mensajes para agrupar TODAS las
-  // conversaciones; el limit/offset se aplica luego sobre las sesiones
-  // agrupadas, no sobre los mensajes.
-  const fetchSize = 5000;
+  const queryText = (req.query.q || "").toString().trim().slice(0, 100);
 
   if (from && !isValidDateInput(from)) {
     return res.status(400).json({ error: "Parametro 'from' invalido. Usa formato ISO 8601." });
@@ -276,75 +359,24 @@ app.get("/api/conversaciones", requireApiKey, async (req, res) => {
     return res.status(400).json({ error: "El parametro 'from' no puede ser mayor que 'to'." });
   }
 
-  const { data, error } = await queryConversacionesDesencriptadas({
-    phone: null,
-    from,
-    to,
-    orderAsc: false,
-    limit: fetchSize,
-  });
-
-  if (error) {
-    return res.status(500).json({ error: "Error consultando base de datos", detail: error.message });
+  let rows;
+  try {
+    rows = await queryListadoConversaciones({ from, to, q: queryText, limit, offset });
+  } catch (err) {
+    return res.status(500).json({ error: "Error consultando base de datos", detail: errorDetail(err) });
   }
 
-  const grouped = new Map();
-  for (const row of data || []) {
-    const sessionKey = row.phone || 'unknown';
-    
-    if (!grouped.has(sessionKey)) {
-      grouped.set(sessionKey, {
-        phone: row.phone,
-        first_message_at: row.timestamp,
-        last_message_at: row.timestamp,
-        message_count: 0,
-        preview: "",
-      });
-    }
-
-    const session = grouped.get(sessionKey);
-    session.message_count += 1;
-
-    if (row.timestamp < session.first_message_at) {
-      session.first_message_at = row.timestamp;
-    }
-    if (row.timestamp > session.last_message_at) {
-      session.last_message_at = row.timestamp;
-    }
-
-    if (!session.preview && row.role === 'user') {
-      session.preview = typeof row.message === 'string' ? row.message.slice(0, 120) : '';
-    }
-  }
-
-  // Dígitos de la búsqueda (para buscar por teléfono con o sin +34, espacios, etc.)
-  const queryDigits = queryText.replace(/\D/g, "");
-  const filteredSessions = [...grouped.values()].filter((session) => {
-      if (!queryText) return true;
-      const porTexto = session.preview.toLowerCase().includes(queryText);
-      const phoneDigits = String(session.phone || "").replace(/\D/g, "");
-      // Coincidencia por teléfono: el nº guardado ya incluye el 34, así que
-      // "626..." (sin prefijo) o "34626..." (con prefijo) encajan igual.
-      const porTelefono =
-        queryDigits.length >= 3 &&
-        (phoneDigits.includes(queryDigits) ||
-          phoneDigits.replace(/^34/, "").includes(queryDigits.replace(/^34/, "")));
-      return porTexto || porTelefono;
-    });
-
-  const sessions = filteredSessions
-    .sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at))
-    .slice(offset, offset + limit)
-    .map((session) => ({
-      ...session,
-      date_range: {
-        from: session.first_message_at,
-        to: session.last_message_at,
-      },
-    }));
+  const sessions = rows.map(({ total, ...session }) => ({
+    ...session,
+    preview: session.preview || "",
+    date_range: {
+      from: session.first_message_at,
+      to: session.last_message_at,
+    },
+  }));
 
   return res.json({
-    total: filteredSessions.length,
+    total: rows[0]?.total ?? 0,
     limit,
     offset,
     filters: {
@@ -404,16 +436,11 @@ app.get("/api/conversaciones/:phone", requireApiKey, async (req, res) => {
     return res.status(400).json({ error: "El parametro 'from' no puede ser mayor que 'to'." });
   }
 
-  const { data, error } = await queryConversacionesDesencriptadas({
-    phone,
-    from,
-    to,
-    orderAsc: true,
-    limit: 5000,
-  });
-
-  if (error) {
-    return res.status(500).json({ error: "Error consultando base de datos", detail: error.message });
+  let data;
+  try {
+    data = await queryConversacionesDesencriptadas({ phone, from, to, orderAsc: true, limit: 5000 });
+  } catch (err) {
+    return res.status(500).json({ error: "Error consultando base de datos", detail: errorDetail(err) });
   }
 
   return res.json({
@@ -530,17 +557,13 @@ app.post("/api/conversaciones/:phone/resumen", requireApiKey, async (req, res) =
   }
 
   try {
-    const { data, error } = await queryConversacionesDesencriptadas({
+    const data = await queryConversacionesDesencriptadas({
       phone,
       from,
       to,
       orderAsc: true,
       limit: maxMessages,
     });
-
-    if (error) {
-      return res.status(500).json({ error: "Error consultando base de datos", detail: error.message });
-    }
 
     if (!data || data.length === 0) {
       return res.status(404).json({ 
@@ -569,37 +592,36 @@ app.post("/api/conversaciones/:phone/resumen", requireApiKey, async (req, res) =
       resumen,
     });
   } catch (err) {
-    console.error("Error generando resumen:", err);
     return res.status(500).json({
       error: "Error generando resumen",
-      detail: err.message || String(err),
+      detail: errorDetail(err),
     });
   }
 });
 
 // Genera el análisis de una semana: estadísticas + texto IA. No guarda nada.
 async function generarAnalisisSemanal({ from, to }) {
-  const { data, error } = await queryConversacionesDesencriptadas({
+  // Las cifras se cuentan en Postgres sobre toda la semana; a la IA solo le
+  // llegan los primeros MAX_MSGS mensajes.
+  const [stats] = await query(
+    `SELECT count(DISTINCT phone)::int AS conversaciones,
+            count(*)::int AS mensajes,
+            count(*) FILTER (WHERE role = 'user')::int AS mensajes_cliente,
+            count(*) FILTER (WHERE role = 'assistant')::int AS mensajes_agente
+       FROM public.conversaciones
+      WHERE "timestamp" >= $1 AND "timestamp" <= $2`,
+    [from, to]
+  );
+  if (!stats.mensajes) return { stats, resumen: null, truncado: false };
+
+  const MAX_MSGS = 400;
+  const usados = await queryConversacionesDesencriptadas({
     phone: null,
     from,
     to,
     orderAsc: true,
-    limit: 5000,
+    limit: MAX_MSGS,
   });
-  if (error) throw new Error(error.message);
-
-  const rows = data || [];
-  const phones = new Set(rows.map((r) => r.phone).filter(Boolean));
-  const stats = {
-    conversaciones: phones.size,
-    mensajes: rows.length,
-    mensajes_cliente: rows.filter((r) => r.role === "user").length,
-    mensajes_agente: rows.filter((r) => r.role === "assistant").length,
-  };
-  if (!rows.length) return { stats, resumen: null, truncado: false };
-
-  const MAX_MSGS = 400;
-  const usados = rows.slice(0, MAX_MSGS);
   const porTelefono = new Map();
   for (const row of usados) {
     const key = row.phone || "desconocido";
@@ -622,7 +644,7 @@ async function generarAnalisisSemanal({ from, to }) {
     system: SYSTEM_RESUMEN_SEMANAL,
     maxTokens: 1400,
   });
-  return { stats, resumen, truncado: rows.length > MAX_MSGS };
+  return { stats, resumen, truncado: stats.mensajes > MAX_MSGS };
 }
 
 /**
@@ -645,18 +667,20 @@ app.get("/api/resumenes-semanales", requireApiKey, async (req, res) => {
   if (from && !isValidDateInput(from)) return res.status(400).json({ error: "Parametro 'from' invalido." });
   if (to && !isValidDateInput(to)) return res.status(400).json({ error: "Parametro 'to' invalido." });
 
-  let query = supabase
-    .from("resumenes_semanales")
-    .select("id, semana_from, semana_to, stats, resumen, created_at")
-    .order("created_at", { ascending: false });
-  if (from) query = query.eq("semana_from", from);
-  if (to) query = query.eq("semana_to", to);
-
-  const { data, error } = await query;
-  if (error) {
-    return res.status(500).json({ error: "Error consultando análisis guardados", detail: error.message });
+  let data;
+  try {
+    data = await query(
+      `SELECT id, semana_from, semana_to, stats, resumen, created_at
+         FROM public.resumenes_semanales
+        WHERE ($1::timestamptz IS NULL OR semana_from = $1)
+          AND ($2::timestamptz IS NULL OR semana_to = $2)
+        ORDER BY created_at DESC`,
+      [from || null, to || null]
+    );
+  } catch (err) {
+    return res.status(500).json({ error: "Error consultando análisis guardados", detail: errorDetail(err) });
   }
-  return res.json({ data: data || [], filters: { from: from || null, to: to || null } });
+  return res.json({ data, filters: { from: from || null, to: to || null } });
 });
 
 app.post("/api/resumenes-semanales", requireApiKey, async (req, res) => {
@@ -672,27 +696,26 @@ app.post("/api/resumenes-semanales", requireApiKey, async (req, res) => {
       return res.status(404).json({ error: "No hubo actividad esa semana, no se ha guardado nada.", stats: analisis.stats });
     }
 
-    const { data, error } = await supabase
-      .from("resumenes_semanales")
-      .insert({ semana_from: from, semana_to: to, stats: analisis.stats, resumen: analisis.resumen })
-      .select("id, semana_from, semana_to, stats, resumen, created_at")
-      .single();
-
-    if (error) {
-      return res.status(500).json({ error: "Error guardando el análisis", detail: error.message });
-    }
+    const [data] = await query(
+      `INSERT INTO public.resumenes_semanales (semana_from, semana_to, stats, resumen)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, semana_from, semana_to, stats, resumen, created_at`,
+      [from, to, analisis.stats, analisis.resumen]
+    );
     return res.json({ ...data, truncado: analisis.truncado });
   } catch (err) {
-    console.error("Error generando análisis semanal:", err);
-    return res.status(500).json({ error: "Error generando análisis semanal", detail: err.message || String(err) });
+    return res.status(500).json({ error: "Error generando análisis semanal", detail: errorDetail(err) });
   }
 });
 
 app.delete("/api/resumenes-semanales/:id", requireApiKey, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: "id inválido" });
-  const { error } = await supabase.from("resumenes_semanales").delete().eq("id", id);
-  if (error) return res.status(500).json({ error: "Error borrando", detail: error.message });
+  try {
+    await query("DELETE FROM public.resumenes_semanales WHERE id = $1", [id]);
+  } catch (err) {
+    return res.status(500).json({ error: "Error borrando", detail: errorDetail(err) });
+  }
   return res.json({ ok: true });
 });
 

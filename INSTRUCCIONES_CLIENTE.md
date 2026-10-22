@@ -1,93 +1,45 @@
-# Acceso a API de Conversaciones - Maquina Motors
+# Panel de conversaciones · Cómo usarlo
 
-## URL de acceso
+Con la VPN conectada, el panel está en la dirección donde lo haya instalado vuestro equipo de sistemas. Por defecto es `http://10.210.19.220:3000`. Para entrar, pide la clave de acceso (`API_ACCESS_KEY`).
 
-- Documentación Swagger: `https://TU-PROYECTO.vercel.app/docs`
-- API Base: `https://TU-PROYECTO.vercel.app`
+## El panel
 
-## Cómo usar la API
+**Conversaciones**
 
-### 1. Acceder a la documentación
+- A la izquierda salen las conversaciones agrupadas por teléfono, de la más reciente a la más antigua, con el último mensaje del cliente.
+- **Buscar** encuentra texto en cualquier mensaje ("financiación", "Rebel"…) o un teléfono, con o sin `+34` y con o sin espacios.
+- **Desde / Hasta** limita las conversaciones a esas fechas.
+- Al abrir una conversación se ven todos los mensajes del cliente y del agente.
+- **Resumen IA** resume esa conversación (solo si está configurado OpenAI).
 
-Abre en tu navegador: `https://TU-PROYECTO.vercel.app/docs`
+**Resúmenes semanales**
 
-### 2. Autorizarte
+- Elige la semana con las flechas y pulsa **Generar análisis**: un informe de cómo han ido las conversaciones, qué se repite y qué conviene mejorar. Las cifras (conversaciones y mensajes) son exactas, se cuentan sobre toda la semana.
+- Los análisis se guardan y se pueden volver a consultar o borrar. Puede haber varios de la misma semana.
 
-1. En la esquina superior derecha de Swagger, haz clic en el botón **Authorize** (candado).
-2. Pega tu clave de acceso (API Key proporcionada por separado).
-3. Haz clic en **Authorize** y luego **Close**.
+**Salir** borra la clave del navegador. También se borra al cerrar la pestaña.
 
-### 3. Probar endpoints
+## La API
 
-Ya puedes expandir cualquier endpoint y hacer clic en **Try it out** para probarlo.
+La misma información está disponible por API para usarla desde otras herramientas. La documentación interactiva está en `/docs`: pulsa **Authorize**, pega la clave y prueba cualquier endpoint con **Try it out**.
 
-## Endpoints disponibles
-
-### `GET /api/health`
-Estado del servicio (no requiere autenticación).
-
-### `GET /api/conversaciones`
-Lista todas las sesiones de conversación.
-
-**Parámetros opcionales:**
-- `limit` (número): Máximo de sesiones a devolver (1-200, por defecto 50)
-- `offset` (número): Desplazamiento para paginación
-- `from` (fecha ISO): Filtra mensajes desde esta fecha (ej: `2026-04-01T00:00:00Z`)
-- `to` (fecha ISO): Filtra mensajes hasta esta fecha (ej: `2026-04-30T23:59:59Z`)
-- `q` (texto): Busca texto en el contenido de mensajes
-
-**Ejemplo:**
-```
-GET /api/conversaciones?limit=20&offset=0&from=2026-04-01T00:00:00Z&q=precio
-```
-
-### `GET /api/conversaciones/{sessionId}`
-Obtiene todos los mensajes de una sesión específica.
-
-**Parámetros opcionales:**
-- `from` (fecha ISO): Filtra mensajes desde esta fecha
-- `to` (fecha ISO): Filtra mensajes hasta esta fecha
-
-**Ejemplo:**
-```
-GET /api/conversaciones/abc123?from=2026-04-01T00:00:00Z
-```
-
-## Uso programático (curl, Postman, código)
-
-Para usar la API desde tu aplicación, incluye el header de autenticación:
+Todas las peticiones, salvo `/api/health`, llevan la cabecera `x-api-key`:
 
 ```bash
-curl -H "x-api-key: TU_CLAVE_AQUI" "https://TU-PROYECTO.vercel.app/api/conversaciones?limit=10"
+curl -H "x-api-key: TU_CLAVE" "http://10.210.19.220:3000/api/conversaciones?limit=10"
 ```
 
-### Ejemplo en JavaScript
+| Endpoint | Qué devuelve |
+|---|---|
+| `GET /api/health` | Estado del servicio y de la conexión con la base de datos. |
+| `GET /api/conversaciones` | Conversaciones agrupadas por teléfono. Parámetros opcionales: `limit` (1-200, por defecto 50), `offset`, `from`, `to` (fechas ISO, por ejemplo `2026-10-01T00:00:00Z`) y `q` (texto o teléfono). |
+| `GET /api/conversaciones/{telefono}` | Mensajes de un teléfono, por ejemplo `34612345678`. Parámetros opcionales: `from` y `to`. |
+| `POST /api/conversaciones/{telefono}/resumen` | Resumen con IA de esa conversación. Opcional en el cuerpo: `from`, `to` y `max_messages` (1-500, por defecto 100). |
+| `GET /api/resumenes-semanales` | Análisis semanales guardados. Opcional: `from` y `to` de la semana. |
+| `POST /api/resumenes-semanales` | Genera y guarda el análisis de una semana. Cuerpo: `{ "from": "...", "to": "..." }`. |
+| `DELETE /api/resumenes-semanales/{id}` | Borra un análisis guardado. |
 
-```javascript
-const response = await fetch('https://TU-PROYECTO.vercel.app/api/conversaciones', {
-  headers: {
-    'x-api-key': 'TU_CLAVE_AQUI'
-  }
-});
-const data = await response.json();
-console.log(data);
-```
+## Importante
 
-### Ejemplo en Python
-
-```python
-import requests
-
-headers = {'x-api-key': 'TU_CLAVE_AQUI'}
-response = requests.get('https://TU-PROYECTO.vercel.app/api/conversaciones', headers=headers)
-data = response.json()
-print(data)
-```
-
-## Soporte
-
-Para cualquier duda o problema con la API, contacta con: [tu email o contacto]
-
----
-
-**Importante:** Mantén tu API Key segura y no la compartas públicamente.
+- La clave da acceso a las conversaciones de los clientes: no la compartáis fuera de quien tenga que usar el panel.
+- Los resúmenes con IA envían el texto de las conversaciones a OpenAI.

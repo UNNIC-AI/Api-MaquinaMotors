@@ -1,0 +1,29 @@
+# Ejemplo para levantar el panel en el mismo servidor que n8n.
+# Copia este fichero a docker-compose.yml, crea el .env a partir de .env.example
+# y ejecuta:  docker compose up -d --build
+
+services:
+  panel-conversaciones:
+    build: .
+    container_name: panel-conversaciones
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      # Publicado solo en la IP interna del servidor (la que se ve por la VPN).
+      # Cambia 10.210.19.220 por la IP interna que corresponda. No lo publiques
+      # en 0.0.0.0 ni lo saques a internet: el panel muestra datos de clientes.
+      - "10.210.19.220:3000:3000"
+    # Postgres instalado directamente en el servidor (fuera de Docker): en
+    # DATABASE_URL usa la IP interna del servidor (10.210.19.220) o, si lo
+    # prefieres, host.docker.internal con esta línea:
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    #
+    # Si Postgres corriera en otro contenedor, une el panel a su red y usa el
+    # nombre de ese contenedor como host en DATABASE_URL:
+    # networks:
+    #   - red_de_postgres
+
+# networks:
+#   red_de_postgres:
+#     external: true

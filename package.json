@@ -1,7 +1,7 @@
 {
   "name": "api-maquinamotors",
   "version": "1.0.0",
-  "description": "API para exponer conversaciones del agente sin compartir credenciales de base de datos.",
+  "description": "API y panel web para consultar las conversaciones del agente de WhatsApp directamente desde el Postgres de n8n.",
   "main": "src/server.js",
   "scripts": {
     "dev": "node --watch src/server.js",
@@ -21,14 +21,17 @@
   },
   "homepage": "https://github.com/UNNIC-AI/Api-MaquinaMotors#readme",
   "dependencies": {
-    "@supabase/supabase-js": "^2.105.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.4.1",
     "helmet": "^8.1.0",
     "morgan": "^1.10.1",
+    "pg": "^8.23.1",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
