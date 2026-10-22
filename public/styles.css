@@ -230,6 +230,12 @@ input { font-family: inherit; }
   display: inline-block; margin-top: 7px; background: var(--surface-3); color: var(--text-dim);
   font-size: 11px; padding: 2px 9px; border-radius: 20px;
 }
+.list-more { display: block; width: calc(100% - 40px); margin: 14px 20px 20px; }
+
+/* Foco visible al navegar con el teclado (no al hacer clic) */
+.session:focus-visible, button:focus-visible, .chip:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px;
+}
 
 /* Avatar */
 .avatar {
@@ -257,7 +263,7 @@ input { font-family: inherit; }
 .detail-head .avatar { width: 38px; height: 38px; font-size: 13px; }
 .detail-back { display: none; padding: 8px 12px; }
 .detail-title { flex: 1; min-width: 0; }
-.detail-title strong { font-size: 16px; }
+.detail-title strong { font-size: 16px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .detail-meta { display: block; font-size: 12px; color: var(--text-dim); margin-top: 2px; }
 
 .summary-box {
@@ -321,17 +327,38 @@ input { font-family: inherit; }
     padding: 10px 14px; border-right: none; border-bottom: 1px solid var(--border);
     overflow-x: auto;
   }
-  .side-brand { padding: 0 8px 0 4px; flex-direction: row; align-items: baseline; gap: 6px; }
-  .side-brand span { display: none; }
-  .side-nav { flex-direction: row; gap: 6px; }
-  .nav-item { padding: 8px 12px; white-space: nowrap; }
+  .side-brand { display: none; }
+  .side-nav { flex-direction: row; gap: 4px; flex: 1; min-width: 0; }
+  .nav-item { padding: 8px 10px; white-space: nowrap; font-size: 13px; width: auto; }
   .side-spacer { display: none; }
-  .side-logout { width: auto; padding: 8px 14px; }
+  .side-logout { width: auto; padding: 8px 12px; flex-shrink: 0; }
+
+  .filters { padding: 12px 16px; gap: 10px; }
+  .field.grow { min-width: 100%; }
+  .field:not(.grow) { flex: 1; min-width: 0; }
+  .field input { width: 100%; }
+  .filter-actions { width: 100%; }
+  .filter-actions button { flex: 1; }
 
   .layout { grid-template-columns: 1fr; }
   .detail-pane { display: none; }
+  /* Dentro de una conversación los filtros sobran: todo el alto para los mensajes */
+  .view.detail-open .filters { display: none; }
   .view.detail-open .list-pane { display: none; }
   .view.detail-open .detail-pane { display: flex; }
+  .detail-head { padding: 12px 16px; gap: 10px; }
   .detail-back { display: inline-block; }
+  .messages { padding: 16px; }
   .msg { max-width: 86%; }
+
+  .view-head { padding: 14px 16px; }
+  .week-nav { width: 100%; justify-content: space-between; }
+  .week-label { min-width: 0; flex: 1; }
+  .resumen-scroll { padding: 16px; }
+}
+
+/* Teléfonos muy estrechos: el botón de resumen se acorta */
+@media (max-width: 400px) {
+  #summary-btn { padding: 10px 12px; font-size: 13px; }
+  .nav-item .nav-dot { display: none; }
 }

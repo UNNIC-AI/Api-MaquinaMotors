@@ -4,7 +4,7 @@
 const KEY_STORAGE = "mm_api_key";
 let apiKey = sessionStorage.getItem(KEY_STORAGE) || null;
 let currentPhone = null;
-const LIST_LIMIT = 200;
+const LIST_LIMIT = 100;
 
 // ============ Helpers DOM ============
 function $(sel) { return document.querySelector(sel); }
@@ -30,7 +30,10 @@ function toast(msg) {
 function formatPhone(p) {
   if (!p) return "Desconocido";
   const d = String(p).replace(/\D/g, "");
-  if (d.length === 11 && d.startsWith("34")) return `+34 ${d.slice(2)}`;
+  if (d.length === 11 && d.startsWith("34")) {
+    const n = d.slice(2);
+    return `+34 ${n.slice(0, 3)} ${n.slice(3, 5)} ${n.slice(5, 7)} ${n.slice(7)}`;
+  }
   return "+" + d;
 }
 function avatarText(name, phone) {
@@ -101,8 +104,10 @@ async function api(path, opts = {}) {
   }
   return data;
 }
-function dayStart(v) { return v ? `${v}T00:00:00` : ""; }
-function dayEnd(v) { return v ? `${v}T23:59:59` : ""; }
+// Inicio y fin del día en la hora local del navegador, enviados con zona horaria
+// (toISOString) para que "el día 22" sea el 22 de aquí y no el de Londres.
+function dayStart(v) { return v ? new Date(`${v}T00:00:00`).toISOString() : ""; }
+function dayEnd(v) { return v ? new Date(`${v}T23:59:59.999`).toISOString() : ""; }
 
 // Formatea Date -> "YYYY-MM-DD" (para los <input type=date>)
 function ymd(d) {
@@ -128,8 +133,15 @@ $("#login-form").addEventListener("submit", async (e) => {
   btn.disabled = true;
   btn.textContent = "Comprobando…";
   try {
-    const res = await fetch("/api/validate", { cache: "no-store", headers: { "x-api-key": val } });
-    if (!res.ok) throw new Error("La API key no es válida");
+    let res;
+    try {
+      res = await fetch("/api/validate", { cache: "no-store", headers: { "x-api-key": val } });
+    } catch {
+      throw new Error("No se ha podido conectar con el servidor. Revisa la conexión o la VPN.");
+    }
+    if (res.status === 401) throw new Error("La API key no es válida");
+    if (res.status === 429) throw new Error("Demasiados intentos. Espera un minuto y vuelve a probar.");
+    if (!res.ok) throw new Error(`El servidor ha respondido con un error (${res.status}). Inténtalo de nuevo en un momento.`);
     apiKey = val;
     sessionStorage.setItem(KEY_STORAGE, val);
     enterApp();
@@ -172,9 +184,16 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
 });
 
 // ============ Lista de conversaciones ============
-async function loadSessions() {
+// Cada búsqueda nueva invalida las respuestas de las anteriores que aún no
+// hayan llegado, para que no se mezclen resultados de filtros distintos.
+let listSeq = 0;
+let listLoaded = 0;
+
+async function loadSessions({ more = false } = {}) {
+  const seq = more ? listSeq : ++listSeq;
   const params = new URLSearchParams();
   params.set("limit", LIST_LIMIT);
+  params.set("offset", more ? listLoaded : 0);
   const q = $("#f-q").value.trim();
   const from = dayStart($("#f-from").value);
   const to = dayEnd($("#f-to").value);
@@ -183,21 +202,40 @@ async function loadSessions() {
   if (to) params.set("to", to);
 
   const list = $("#list");
-  list.innerHTML = "";
-  list.appendChild(loadingState());
+  $("#list-more")?.remove();
+  if (!more) {
+    listLoaded = 0;
+    list.innerHTML = "";
+  }
+  const loading = loadingState();
+  list.appendChild(loading);
 
   try {
     const data = await api(`/api/conversaciones?${params}`);
-    list.innerHTML = "";
+    if (seq !== listSeq) return;
+    loading.remove();
     $("#list-count").textContent =
       `${data.total} ${data.total === 1 ? "conversación" : "conversaciones"}`;
-    if (!data.data.length) {
-      list.appendChild(emptyState("Sin resultados con estos filtros"));
+    if (!more && !data.data.length) {
+      list.appendChild(emptyState(
+        $("#f-from").value || $("#f-to").value
+          ? "Sin resultados en estas fechas. Prueba a ampliarlas o pulsa Limpiar."
+          : "Sin resultados"
+      ));
       return;
     }
     for (const s of data.data) list.appendChild(sessionCard(s));
+    listLoaded += data.data.length;
+    if (listLoaded < data.total) {
+      const btn = el("button", "btn-ghost list-more", `Cargar más (${data.total - listLoaded} restantes)`);
+      btn.id = "list-more";
+      btn.addEventListener("click", () => loadSessions({ more: true }));
+      list.appendChild(btn);
+    }
   } catch (ex) {
-    list.innerHTML = "";
+    if (seq !== listSeq) return;
+    loading.remove();
+    if (!more) list.innerHTML = "";
     list.appendChild(emptyState(ex.message));
     toast(ex.message);
   }
@@ -206,6 +244,12 @@ async function loadSessions() {
 function sessionCard(s) {
   const card = el("div", "session");
   card.dataset.phone = s.phone || "";
+  card.tabIndex = 0;
+  card.setAttribute("role", "button");
+  card.setAttribute("aria-label", `Conversación con ${formatPhone(s.phone)}`);
+  card.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); card.click(); }
+  });
   card.appendChild(makeAvatar(s.phone));
 
   const body = el("div", "session-body");
@@ -225,22 +269,32 @@ function sessionCard(s) {
   return card;
 }
 
-$("#search-btn").addEventListener("click", loadSessions);
-$("#refresh-btn").addEventListener("click", loadSessions);
+$("#search-btn").addEventListener("click", () => loadSessions());
+$("#refresh-btn").addEventListener("click", () => loadSessions());
 $("#f-q").addEventListener("keydown", (e) => { if (e.key === "Enter") loadSessions(); });
+// Limpiar quita la búsqueda y las fechas: se ve todo el historial.
 $("#clear-btn").addEventListener("click", () => {
   $("#f-q").value = "";
-  setDefaultDates();
+  $("#f-from").value = "";
+  $("#f-to").value = "";
   loadSessions();
 });
 
 // ============ Detalle de conversación ============
+// Si se abre otra conversación mientras carga la anterior (o su resumen), la
+// respuesta que llegue tarde se descarta para no mezclar conversaciones.
+let detailSeq = 0;
+
 async function openDetail(phone) {
+  const seq = ++detailSeq;
   currentPhone = phone;
   $("#view-conversaciones").classList.add("detail-open");
   hide($("#detail-empty"));
   show($("#detail"));
   hide($("#summary-box"));
+  const summaryBtn = $("#summary-btn");
+  summaryBtn.disabled = false;
+  summaryBtn.textContent = "Resumen IA";
 
   const av = $("#detail-avatar");
   av.textContent = avatarText(null, phone);
@@ -252,16 +306,13 @@ async function openDetail(phone) {
   box.innerHTML = "";
   box.appendChild(loadingState());
 
-  const params = new URLSearchParams();
-  const from = dayStart($("#f-from").value);
-  const to = dayEnd($("#f-to").value);
-  if (from) params.set("from", from);
-  if (to) params.set("to", to);
-
+  // La conversación se muestra entera: las fechas del filtro sirven para
+  // encontrarla en la lista, no para recortarla.
   try {
-    const data = await api(`/api/conversaciones/${encodeURIComponent(phone)}?${params}`);
+    const data = await api(`/api/conversaciones/${encodeURIComponent(phone)}`);
+    if (seq !== detailSeq) return;
     box.innerHTML = "";
-    $("#detail-meta").textContent = `${data.message_count} mensajes`;
+    $("#detail-meta").textContent = `${data.message_count} mensaje${data.message_count === 1 ? "" : "s"}`;
     if (!data.messages.length) {
       box.appendChild(emptyState("Sin mensajes"));
       return;
@@ -279,6 +330,7 @@ async function openDetail(phone) {
     }
     box.scrollTop = 0;
   } catch (ex) {
+    if (seq !== detailSeq) return;
     box.innerHTML = "";
     box.appendChild(emptyState(ex.message));
     toast(ex.message);
@@ -304,6 +356,7 @@ $("#detail-back").addEventListener("click", () => {
 // ============ Resumen IA ============
 $("#summary-btn").addEventListener("click", async () => {
   if (!currentPhone) return;
+  const seq = detailSeq;
   const btn = $("#summary-btn");
   const box = $("#summary-box");
   btn.disabled = true;
@@ -312,17 +365,13 @@ $("#summary-btn").addEventListener("click", async () => {
   box.innerHTML = "";
   box.appendChild(loadingState());
 
-  const body = {};
-  const from = dayStart($("#f-from").value);
-  const to = dayEnd($("#f-to").value);
-  if (from) body.from = from;
-  if (to) body.to = to;
-
+  // Resume los últimos 100 mensajes de la conversación entera, igual que el detalle.
   try {
     const data = await api(`/api/conversaciones/${encodeURIComponent(currentPhone)}/resumen`, {
       method: "POST",
-      body: JSON.stringify(body),
+      body: JSON.stringify({}),
     });
+    if (seq !== detailSeq) return;
     box.innerHTML = "";
     const title = el("div", "summary-title");
     title.appendChild(el("span", null, "Resumen IA"));
@@ -337,12 +386,15 @@ $("#summary-btn").addEventListener("click", async () => {
     box.appendChild(title);
     box.appendChild(el("div", "summary-text", data.resumen));
   } catch (ex) {
+    if (seq !== detailSeq) return;
     box.innerHTML = "";
     box.appendChild(el("div", "summary-text", "No se pudo generar el resumen: " + ex.message));
     toast(ex.message);
   } finally {
-    btn.disabled = false;
-    btn.textContent = "Resumen IA";
+    if (seq === detailSeq) {
+      btn.disabled = false;
+      btn.textContent = "Resumen IA";
+    }
   }
 });
 
@@ -373,7 +425,9 @@ function weekRange(offset) {
 function fmtRange(a, b) {
   const opt = { day: "numeric", month: "short" };
   const ya = a.getFullYear(), yb = b.getFullYear();
-  return `${a.toLocaleDateString("es-ES", opt)} – ${b.toLocaleDateString("es-ES", opt)} ${yb}${ya !== yb ? "" : ""}`;
+  // Si la semana cruza de año (29 dic – 4 ene) se pone el año en los dos extremos
+  const inicio = a.toLocaleDateString("es-ES", opt) + (ya !== yb ? ` ${ya}` : "");
+  return `${inicio} – ${b.toLocaleDateString("es-ES", opt)} ${yb}`;
 }
 function updateWeekLabel() {
   const { monday, sunday } = weekRange(weekOffset);
@@ -388,7 +442,7 @@ function statCard(num, label) {
 }
 function currentWeekParams() {
   const { monday, sunday } = weekRange(weekOffset);
-  return { from: `${ymd(monday)}T00:00:00`, to: `${ymd(sunday)}T23:59:59` };
+  return { from: dayStart(ymd(monday)), to: dayEnd(ymd(sunday)) };
 }
 function emptyPrompt(msg) {
   const d = el("div", "placeholder");
@@ -479,7 +533,11 @@ function renderResumenText(container, text) {
   }
 }
 
+// Al cambiar de semana rápido, solo cuenta la respuesta de la última pedida.
+let weekSeq = 0;
+
 async function loadSavedAnalyses() {
+  const seq = ++weekSeq;
   const { from, to } = currentWeekParams();
   const summary = $("#week-summary");
   $("#week-history").innerHTML = "";
@@ -489,6 +547,7 @@ async function loadSavedAnalyses() {
   try {
     const params = new URLSearchParams({ from, to });
     const data = await api(`/api/resumenes-semanales?${params}`);
+    if (seq !== weekSeq) return;
     savedAnalyses = data.data || [];
     if (savedAnalyses.length) {
       selectAnalysis(savedAnalyses[0].id);
@@ -498,6 +557,7 @@ async function loadSavedAnalyses() {
       summary.appendChild(emptyPrompt());
     }
   } catch (ex) {
+    if (seq !== weekSeq) return;
     summary.innerHTML = "";
     summary.appendChild(emptyState(ex.message));
     toast(ex.message);
@@ -505,6 +565,7 @@ async function loadSavedAnalyses() {
 }
 
 async function deleteAnalysis(id) {
+  if (!confirm("¿Borrar este análisis? No se puede deshacer.")) return;
   try {
     await api(`/api/resumenes-semanales/${id}`, { method: "DELETE" });
     savedAnalyses = savedAnalyses.filter((a) => a.id !== id);
@@ -529,6 +590,7 @@ $("#week-next").addEventListener("click", () => { if (weekOffset < 0) { weekOffs
 $("#week-gen").addEventListener("click", async () => {
   const btn = $("#week-gen");
   const summary = $("#week-summary");
+  const seq = ++weekSeq;
   btn.disabled = true;
   btn.textContent = "Generando…";
   $("#week-stats").innerHTML = "";
@@ -540,10 +602,14 @@ $("#week-gen").addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({ from, to }),
     });
+    // Si mientras tanto se ha cambiado de semana, el análisis queda guardado
+    // pero no se pinta encima de la otra semana.
+    if (seq !== weekSeq) { toast("Análisis guardado en su semana."); return; }
     savedAnalyses.unshift(data);
     selectAnalysis(data.id);
     if (data.truncado) toast("Semana con mucho volumen: análisis sobre una muestra de los mensajes.");
   } catch (ex) {
+    if (seq !== weekSeq) return;
     summary.innerHTML = "";
     summary.appendChild(emptyState(ex.message));
     toast(ex.message);

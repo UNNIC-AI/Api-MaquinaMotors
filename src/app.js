@@ -467,7 +467,7 @@ app.get("/api/conversaciones/:phone", requireApiKey, async (req, res) => {
  *   post:
  *     tags: [Conversaciones]
  *     summary: Genera resumen de conversacion por telefono con IA
- *     description: Genera un resumen automatico de la conversacion usando OpenAI. El body es opcional, tambien puedes pasar parametros por query string.
+ *     description: Genera un resumen automatico de los ultimos mensajes de la conversacion usando OpenAI. El body es opcional, tambien puedes pasar parametros por query string.
  *     security:
  *       - ApiKeyAuth: []
  *     parameters:
@@ -557,13 +557,15 @@ app.post("/api/conversaciones/:phone/resumen", requireApiKey, async (req, res) =
   }
 
   try {
-    const data = await queryConversacionesDesencriptadas({
+    // Los ÚLTIMOS max_messages mensajes (lo más reciente es lo que importa),
+    // puestos luego en orden cronológico para la IA.
+    const data = (await queryConversacionesDesencriptadas({
       phone,
       from,
       to,
-      orderAsc: true,
+      orderAsc: false,
       limit: maxMessages,
-    });
+    })).reverse();
 
     if (!data || data.length === 0) {
       return res.status(404).json({ 
@@ -660,7 +662,30 @@ async function generarAnalisisSemanal({ from, to }) {
  *   post:
  *     tags: [Resúmenes]
  *     summary: Genera y GUARDA un análisis de la semana (permite varios por semana)
+ *     description: Requiere OPENAI_API_KEY. Envía a OpenAI el texto de las conversaciones de esa semana.
  *     security: [{ ApiKeyAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [from, to]
+ *             properties:
+ *               from: { type: string, format: date-time, example: "2026-10-18T22:00:00.000Z" }
+ *               to: { type: string, format: date-time, example: "2026-10-25T21:59:59.999Z" }
+ *     responses:
+ *       200: { description: Análisis generado y guardado }
+ *       404: { description: Sin actividad esa semana (no se guarda nada) }
+ * /api/resumenes-semanales/{id}:
+ *   delete:
+ *     tags: [Resúmenes]
+ *     summary: Borra un análisis guardado
+ *     security: [{ ApiKeyAuth: [] }]
+ *     parameters:
+ *       - { in: path, name: id, required: true, schema: { type: integer } }
+ *     responses:
+ *       200: { description: Borrado }
  */
 app.get("/api/resumenes-semanales", requireApiKey, async (req, res) => {
   const { from, to } = req.query;
@@ -669,11 +694,14 @@ app.get("/api/resumenes-semanales", requireApiKey, async (req, res) => {
 
   let data;
   try {
+    // Se busca la semana con margen de unas horas y no por igualdad exacta:
+    // los análisis antiguos se guardaron con la semana en UTC y los nuevos en
+    // hora local, así que el lunes 00:00 puede ser 22:00 o 23:00 del domingo.
     data = await query(
       `SELECT id, semana_from, semana_to, stats, resumen, created_at
          FROM public.resumenes_semanales
-        WHERE ($1::timestamptz IS NULL OR semana_from = $1)
-          AND ($2::timestamptz IS NULL OR semana_to = $2)
+        WHERE ($1::timestamptz IS NULL OR semana_from BETWEEN $1::timestamptz - interval '14 hours' AND $1::timestamptz + interval '14 hours')
+          AND ($2::timestamptz IS NULL OR semana_to BETWEEN $2::timestamptz - interval '14 hours' AND $2::timestamptz + interval '14 hours')
         ORDER BY created_at DESC`,
       [from || null, to || null]
     );
